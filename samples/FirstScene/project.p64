@@ -1,0 +1,14 @@
+{
+  "name": "FirstScene",
+  "startup_scene": "scenes/main.scenep64",
+  "render_settings": {
+    "internal_resolution": [
+      320,
+      240
+    ],
+    "texture_filter": "nearest",
+    "color_levels": 32,
+    "dithering": true,
+    "fog": true
+  }
+}

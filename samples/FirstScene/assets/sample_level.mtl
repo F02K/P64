@@ -1,0 +1,5 @@
+newmtl Ground
+Kd 0.36 0.50 0.28
+
+newmtl Door
+Kd 0.42 0.22 0.12

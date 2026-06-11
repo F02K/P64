@@ -1,0 +1,185 @@
+{
+  "name": "main",
+  "render_settings": {
+    "internal_resolution": [
+      320,
+      240
+    ],
+    "texture_filter": "nearest",
+    "color_levels": 32,
+    "dithering": true,
+    "fog": true
+  },
+  "entities": [
+    {
+      "id": "camera",
+      "name": "Camera",
+      "active": true,
+      "transform": {
+        "position": [
+          0.0,
+          2.5,
+          7.0
+        ],
+        "rotation": [
+          -18.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [
+        {
+          "type": "Camera",
+          "enabled": true,
+          "fov": 60.0,
+          "near": 0.1,
+          "far": 500.0,
+          "active": true
+        }
+      ],
+      "children": []
+    },
+    {
+      "id": "sun",
+      "name": "Sun",
+      "active": true,
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          -45.0,
+          30.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [
+        {
+          "type": "Light",
+          "enabled": true,
+          "kind": "directional",
+          "color": [
+            1.0,
+            0.96,
+            0.84
+          ],
+          "intensity": 1.25
+        }
+      ],
+      "children": []
+    },
+    {
+      "id": "fog",
+      "name": "Fog",
+      "active": true,
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [
+        {
+          "type": "Fog",
+          "enabled": true,
+          "color": [
+            0.46,
+            0.58,
+            0.72
+          ],
+          "size": [
+            80.0,
+            35.0,
+            80.0
+          ],
+          "near": 18.0,
+          "far": 85.0,
+          "density": 0.08
+        }
+      ],
+      "children": []
+    },
+    {
+      "id": "7d248d411762485f898d765a46477788",
+      "name": "model",
+      "active": true,
+      "transform": {
+        "position": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          0.1,
+          0.1,
+          0.1
+        ]
+      },
+      "components": [],
+      "children": [
+        {
+          "id": "b0f30794c06a4da1a0c5dabf68dd3ac1",
+          "name": "0",
+          "active": true,
+          "transform": {
+            "position": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "rotation": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "components": [
+            {
+              "type": "MeshRenderer",
+              "enabled": true,
+              "mesh": "mesh_ocarina",
+              "submesh": "0",
+              "material": "material_0",
+              "shader": null,
+              "visible": true
+            }
+          ],
+          "children": []
+        }
+      ]
+    }
+  ]
+}

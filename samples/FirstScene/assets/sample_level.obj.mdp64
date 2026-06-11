@@ -1,0 +1,16 @@
+{
+  "id": "mesh_sample_level",
+  "kind": "obj_mesh",
+  "source": "assets/sample_level.obj",
+  "groups": [
+    "Floor",
+    "Door"
+  ],
+  "materials": [
+    "Ground",
+    "Door"
+  ],
+  "settings": {
+    "import_mode": "groups_as_nodes"
+  }
+}

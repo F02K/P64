@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "p64"
+version = "0.1.0"
+description = "A Python N64-style game engine and editor."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "F02K" }]
+dependencies = [
+    "PySide6>=6.8",
+    "moderngl>=5.10",
+    "numpy>=2.0",
+    "pillow>=10.0",
+    "pyinstaller>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+p64 = "p64.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
