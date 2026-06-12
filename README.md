@@ -7,16 +7,22 @@ custom `.shader` files, and Windows desktop builds through PyInstaller.
 ## Current Capabilities
 
 - P64 Hub project manager for creating, adding, opening, removing, and deleting projects.
-- Native project folders with `assets/`, `scenes/`, `scripts/`, and `build/`.
+- Native project folders with `assets/`, `packages/`, and `build/`.
 - Project manifests use `project.p64`.
 - Scene files use `.scenep64`.
 - Generated asset metadata files use `.mdp64`.
+- Scenes and scripts live under `assets/scenes/` and `assets/scripts/`.
+- Builtin engine assets live under `packages/P64Builtin/`.
 - Scene graph with entities, parenting, transforms, cameras, lights, fog volumes,
   mesh renderers, and Python script components.
 - OBJ/MTL import with groups, materials, UVs, normals, texture metadata, and
   submesh hierarchy support.
 - Scene/Game viewport tabs, scene camera navigation, hierarchy selection, shared
   entity/asset inspector, asset tree, and console.
+- Project Settings window for startup scene, render settings, build settings, and
+  Scene view grid settings.
+- Camera-centered Scene grid with distance fade and subtle world axes.
+- Multi-scene editing by double-clicking `.scenep64` files in the asset browser.
 - N64-style rendering path with low-resolution upscaling, nearest texture sampling,
   fog, simple lighting, and shader selection.
 - Runtime bundle creation and optional PyInstaller executable builds.
@@ -67,14 +73,18 @@ p64.bat run samples\FirstScene
 MyGame/
   project.p64
   assets/
+    scenes/
+      main.scenep64
+    scripts/
+      spin.py
     model.obj
     model.obj.mdp64
     shaders/
       n64_textured.shader
-  scenes/
-    main.scenep64
-  scripts/
-    spin.py
+  packages/
+    P64Builtin/
+      shaders/
+        standard_n64.shader
   build/
 ```
 
@@ -88,6 +98,31 @@ Legacy files still load and can be migrated:
 
 ```powershell
 python -m p64 migrate samples\FirstScene
+```
+
+## Scenes And Scripts
+
+Open a scene in the editor by double-clicking a `.scenep64` file in the asset
+browser. If the current scene has unsaved changes, the editor asks whether to
+save, discard, or cancel before switching.
+
+Scripts can request scene changes:
+
+```python
+from p64.engine.scripting import UserScript
+
+
+class ChangeScene(UserScript):
+    def on_update(self, dt):
+        self.scene_manager.load_scene_by_name("main")
+```
+
+Objects can persist across scene switches:
+
+```python
+class Player(UserScript):
+    def on_start(self):
+        self.persistent()
 ```
 
 ## Hub Build
@@ -135,6 +170,9 @@ samples/FirstScene/build/game/FirstScene/
 
 As with the Hub, keep the built game executable together with its generated
 support files/folders.
+
+Build behavior can be changed in the editor through `Project Settings`, including
+the executable name, relative build output folder, and windowed/console mode.
 
 ## Tests
 

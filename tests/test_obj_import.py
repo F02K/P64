@@ -46,7 +46,9 @@ class ObjImportTests(unittest.TestCase):
 
             self.assertEqual(metadata.groups, ["Floor", "Door"])
             self.assertTrue((project.assets_dir / "scene.obj.mdp64").exists())
+            self.assertTrue(imported.is_game_object)
             self.assertEqual([child.name for child in imported.children], ["Floor", "Door"])
+            self.assertTrue(all(child.is_game_object for child in imported.children))
 
     def test_mtl_parser_resolves_diffuse_texture(self):
         mtl = Path("samples/FirstScene/assets/Ocarina/model.mtl")

@@ -7,8 +7,8 @@ from p64.engine.shader import discover_shaders, parse_shader, shader_asset_id
 
 class ShaderAssetTests(unittest.TestCase):
     def test_parse_unity_style_shader_sections(self):
-        shader = parse_shader(Path("samples/FirstScene/assets/shaders/n64_textured.shader"))
-        self.assertEqual(shader.name, "P64/N64Textured")
+        shader = parse_shader(Path("samples/FirstScene/assets/shaders/standard_textured.shader"))
+        self.assertEqual(shader.name, "P64/Standard Textured")
         self.assertIn("in_position", shader.vertex)
         self.assertIn("fragColor", shader.fragment)
 
@@ -34,8 +34,35 @@ class ShaderAssetTests(unittest.TestCase):
     def test_discover_shader_assets_and_ids(self):
         root = Path("samples/FirstScene")
         shaders = discover_shaders(root / "assets")
-        self.assertIn(root / "assets/shaders/n64_textured.shader", shaders)
-        self.assertEqual(shader_asset_id(root, shaders[0]), "assets/shaders/n64_textured.shader")
+        self.assertIn(root / "assets/shaders/standard_textured.shader", shaders)
+        self.assertIn(root / "packages/P64Builtin/shaders/standard_vertex_lit.shader", shaders)
+        self.assertIn(root / "packages/P64Builtin/shaders/standard_unlit.shader", shaders)
+        self.assertIn("assets/shaders/standard_textured.shader", [shader_asset_id(root, shader) for shader in shaders])
+
+    def test_no_console_specific_names_outside_readme_or_generated_assets(self):
+        forbidden = ("n" + "64").lower()
+        ignored_parts = {
+            ".git",
+            "build",
+            "__pycache__",
+            ".pytest_cache",
+            "libraries",
+        }
+        offenders: list[str] = []
+        for path in Path(".").rglob("*"):
+            if not path.is_file():
+                continue
+            parts = set(path.parts)
+            if parts & ignored_parts:
+                continue
+            if path.name.lower().startswith("readme"):
+                continue
+            if path.suffix.lower() not in {".py", ".toml", ".shader", ".p64", ".scenep64", ".mdp64"}:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore").lower()
+            if forbidden in text or forbidden in path.name.lower():
+                offenders.append(path.as_posix())
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":

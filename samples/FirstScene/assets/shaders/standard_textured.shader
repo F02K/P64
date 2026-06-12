@@ -1,4 +1,4 @@
-Shader "P64/N64Textured"
+Shader "P64/Standard Textured"
 {
     Vertex
     {
@@ -10,12 +10,9 @@ Shader "P64/N64Textured"
         uniform mat4 u_view;
         uniform mat4 u_projection;
         out vec2 v_uv;
-        out float v_light;
         out vec3 v_world_pos;
         void main() {
-            vec4 world_pos = u_model * vec4(in_position, 1.0);
-            vec3 normal = normalize(mat3(u_model) * in_normal);
-            v_light = clamp(dot(normal, normalize(vec3(-0.4, 0.8, 0.5))) * 0.5 + 0.5, 0.18, 1.0);
+            vec4 world_pos = u_model * vec4(in_position + in_normal * 0.0, 1.0);
             v_uv = in_uv;
             v_world_pos = world_pos.xyz;
             gl_Position = u_projection * u_view * world_pos;
@@ -36,13 +33,11 @@ Shader "P64/N64Textured"
         uniform float u_fog_density;
         uniform float u_color_levels;
         in vec2 v_uv;
-        in float v_light;
         in vec3 v_world_pos;
         out vec4 fragColor;
         void main() {
             vec4 texel = texture(u_texture, v_uv);
-            vec3 lit = texel.rgb * v_light;
-            vec3 quantized = floor(lit * u_color_levels) / u_color_levels;
+            vec3 quantized = floor(texel.rgb * u_color_levels) / u_color_levels;
             vec3 half_size = max(u_fog_size * 0.5, vec3(0.001));
             vec3 volume_pos = abs(v_world_pos - u_fog_center) / half_size;
             float inside_volume = 1.0 - smoothstep(0.92, 1.0, max(max(volume_pos.x, volume_pos.y), volume_pos.z));

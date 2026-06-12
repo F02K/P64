@@ -5,7 +5,7 @@
       320,
       240
     ],
-    "texture_filter": "nearest",
+    "texture_filter": "three_point",
     "color_levels": 32,
     "dithering": true,
     "fog": true
@@ -15,6 +15,7 @@
       "id": "camera",
       "name": "Camera",
       "active": true,
+      "persistent": false,
       "transform": {
         "position": [
           0.0,
@@ -48,6 +49,7 @@
       "id": "sun",
       "name": "Sun",
       "active": true,
+      "persistent": false,
       "transform": {
         "position": [
           0.0,
@@ -84,6 +86,7 @@
       "id": "fog",
       "name": "Fog",
       "active": true,
+      "persistent": false,
       "transform": {
         "position": [
           0.0,
@@ -123,13 +126,14 @@
       "children": []
     },
     {
-      "id": "7d248d411762485f898d765a46477788",
-      "name": "model",
+      "id": "251cb156c9e5477b846598925e8d5250",
+      "name": "sample_level",
       "active": true,
+      "persistent": false,
       "transform": {
         "position": [
           0.0,
-          1.0,
+          0.0,
           0.0
         ],
         "rotation": [
@@ -138,17 +142,18 @@
           0.0
         ],
         "scale": [
-          0.1,
-          0.1,
-          0.1
+          1.0,
+          1.0,
+          1.0
         ]
       },
       "components": [],
       "children": [
         {
-          "id": "b0f30794c06a4da1a0c5dabf68dd3ac1",
-          "name": "0",
+          "id": "dc50f6ab5c7b404da2e623d34c335b52",
+          "name": "Floor",
           "active": true,
+          "persistent": false,
           "transform": {
             "position": [
               0.0,
@@ -170,9 +175,44 @@
             {
               "type": "MeshRenderer",
               "enabled": true,
-              "mesh": "mesh_ocarina",
-              "submesh": "0",
-              "material": "material_0",
+              "mesh": "mesh_sample_level",
+              "submesh": "Floor",
+              "material": "Ground",
+              "shader": null,
+              "visible": true
+            }
+          ],
+          "children": []
+        },
+        {
+          "id": "2f9f630e7d62414d9b0b039f9716d0bb",
+          "name": "Door",
+          "active": true,
+          "persistent": false,
+          "transform": {
+            "position": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "rotation": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "components": [
+            {
+              "type": "MeshRenderer",
+              "enabled": true,
+              "mesh": "mesh_sample_level",
+              "submesh": "Door",
+              "material": "Door",
               "shader": null,
               "visible": true
             }

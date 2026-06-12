@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "p64"
 version = "0.1.0"
-description = "A Python N64-style game engine and editor."
+description = "A Python retro 3D game engine and editor."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -16,6 +16,7 @@ dependencies = [
     "numpy>=2.0",
     "pillow>=10.0",
     "pyinstaller>=6.0",
+    "pygame>=2.5",
 ]
 
 [project.optional-dependencies]

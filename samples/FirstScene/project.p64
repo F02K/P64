@@ -1,14 +1,33 @@
 {
   "name": "FirstScene",
-  "startup_scene": "scenes/main.scenep64",
+  "startup_scene": "assets/scenes/main.scenep64",
   "render_settings": {
     "internal_resolution": [
       320,
       240
     ],
-    "texture_filter": "nearest",
+    "texture_filter": "three_point",
     "color_levels": 32,
     "dithering": true,
     "fog": true
+  },
+  "build_settings": {
+    "executable_name": "FirstScene",
+    "output_folder": "build/game",
+    "default_build_mode": "executable",
+    "windowed": true,
+    "icon_path": "",
+    "python_executable": "",
+    "build_pipeline_path": "libraries/P64Build",
+    "auto_install_build_dependencies": true
+  },
+  "editor_settings": {
+    "scene_grid": {
+      "enabled": true,
+      "spacing": 1.0,
+      "radius": 40.0,
+      "fade_start": 18.0,
+      "fade_end": 40.0
+    }
   }
 }
