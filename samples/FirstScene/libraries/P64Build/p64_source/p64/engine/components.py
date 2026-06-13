@@ -54,6 +54,8 @@ class MeshRenderer(Component):
     submesh: str | None = None
     material: str | None = None
     shader: str | None = None
+    source_materials: list[str] = field(default_factory=list)
+    material_slots: list[str | None] = field(default_factory=list)
     visible: bool = True
     type_name: str = "MeshRenderer"
 
@@ -64,6 +66,8 @@ class MeshRenderer(Component):
             "submesh": self.submesh,
             "material": self.material,
             "shader": self.shader,
+            "source_materials": self.source_materials,
+            "material_slots": self.material_slots,
             "visible": self.visible,
         })
         return data
@@ -319,6 +323,8 @@ def component_from_dict(data: dict[str, Any]) -> Component:
             submesh=data.get("submesh"),
             material=data.get("material"),
             shader=normalize_shader_id(data.get("shader")),
+            source_materials=list(data.get("source_materials", [])),
+            material_slots=list(data.get("material_slots", [])),
             visible=bool(data.get("visible", True)),
         )
     if kind == "Camera":

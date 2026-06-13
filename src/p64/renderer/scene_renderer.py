@@ -9,6 +9,7 @@ from p64.engine.assets import AssetMetadata, discover_metadata
 from p64.engine.collision import collider_bounds, collider_sphere, controller_bounds
 from p64.engine.components import Camera, CharacterController, Collider, Light, MeshRenderer, SpawnPoint
 from p64.engine.entity import Entity
+from p64.engine.material import MaterialAsset, load_material_metadata, resolve_material_reference
 from p64.engine.math import Vec3
 from p64.engine.mesh_geometry import clear_convex_hull_cache, convex_hull, mesh_triangles, transform_triangle
 from p64.engine.obj import mesh_vertices_for_group, parse_obj
@@ -19,6 +20,10 @@ from p64.renderer.shaders import ERROR_FRAGMENT_SHADER, ERROR_VERTEX_SHADER, STA
 
 
 MAX_SHADER_LIGHTS = 8
+MESH_VERTEX_FLOATS = 11
+MESH_VERTEX_LAYOUT = "3f 2f 3f 3f"
+MESH_POSITION_ONLY_LAYOUT = "3f 32x"
+MESH_OUTLINE_LAYOUT = "3f 8x 3f 12x"
 
 
 @dataclass
@@ -29,7 +34,10 @@ class RenderMesh:
     texture: Any
     model_matrix: list[float]
     shader: str | None
+    base_color: tuple[float, float, float]
+    material_properties: dict[str, Any] | None = None
     outline_vao: Any | None = None
+    edge_mesh: RenderLineMesh | None = None
 
 
 @dataclass
@@ -62,7 +70,6 @@ class SceneRenderer:
             vertex_shader="""
                 #version 330
                 in vec3 in_position;
-                in vec2 in_uv;
                 in vec3 in_normal;
                 uniform mat4 u_model;
                 uniform mat4 u_view;
@@ -70,7 +77,7 @@ class SceneRenderer:
                 uniform float u_outline_width;
                 void main() {
                     vec4 world_pos = u_model * vec4(in_position, 1.0);
-                    vec3 world_normal = normalize(mat3(u_model) * in_normal + vec3(in_uv, 0.0) * 0.0);
+                    vec3 world_normal = normalize(mat3(u_model) * in_normal);
                     gl_Position = u_projection * u_view * vec4(world_pos.xyz + world_normal * u_outline_width, 1.0);
                 }
             """,
@@ -106,7 +113,7 @@ class SceneRenderer:
         self._program_cache: dict[str | None, Any] = {None: self.program, "__p64_error__": self.error_program}
         self._metadata: dict[str, AssetMetadata] = {}
         self._texture_cache: dict[Path, Any] = {}
-        self._mesh_cache: dict[tuple[str, str | None, str | None, str | None], RenderMesh] = {}
+        self._mesh_cache: dict[tuple[str, str | None, str | None, str | None, tuple[str, ...], tuple[str | None, ...]], RenderMesh] = {}
         self._mesh_collider_line_cache: dict[tuple[str, str | None], RenderLineMesh] = {}
         self._convex_collider_line_cache: dict[tuple[str, str | None], RenderLineMesh] = {}
         self._white_texture = None
@@ -199,6 +206,7 @@ class SceneRenderer:
         self._set_uniform(program, "u_projection", _mat4_bytes(projection), write=True)
         self._set_uniform(program, "u_color_levels", float(scene.render_settings.get("color_levels", 32)))
         self._set_uniform(program, "u_texture_filter", _texture_filter_code(str(scene.render_settings.get("texture_filter", "three_point"))))
+        self._set_uniform(program, "u_dithering_enabled", bool(scene.render_settings.get("dithering", True)))
         self._apply_light_uniforms(program, scene)
         self._apply_fog_uniforms(program, scene, camera)
 
@@ -207,9 +215,9 @@ class SceneRenderer:
         self._set_uniform(program, "u_light_count", len(lights))
         self._set_uniform(program, "u_ambient_color", (0.18, 0.18, 0.18))
         kinds: list[int] = []
-        positions: list[float] = []
-        directions: list[float] = []
-        colors: list[float] = []
+        positions: list[tuple[float, float, float]] = []
+        directions: list[tuple[float, float, float]] = []
+        colors: list[tuple[float, float, float]] = []
         intensities: list[float] = []
         ranges: list[float] = []
         spot_angles: list[float] = []
@@ -237,9 +245,9 @@ class SceneRenderer:
                 spot_angle_value = 45.0
                 falloff_value = 2.0
             kinds.append(kind_value)
-            positions.extend(position_value)
-            directions.extend(direction_value)
-            colors.extend(color_value)
+            positions.append(position_value)
+            directions.append(direction_value)
+            colors.append(color_value)
             intensities.append(intensity_value)
             ranges.append(range_value)
             spot_angles.append(spot_angle_value)
@@ -289,7 +297,7 @@ class SceneRenderer:
         mesh = self._load_mesh(entity, component)
         if mesh is None:
             return False
-        program = self._program_for(component.shader)
+        program = self._program_for(mesh.shader)
         render_camera = getattr(self, "_current_camera", _camera_from_entity(None))
         view = getattr(self, "_current_view", _view_matrix(render_camera))
         projection = getattr(self, "_current_projection", _perspective_matrix(render_camera.fov, 1.0, render_camera.near, render_camera.far))
@@ -299,11 +307,13 @@ class SceneRenderer:
         self._set_uniform(program, "u_model", _mat4_bytes(entity.transform.world_matrix(entity)), write=True)
         mesh.texture.use(location=0)
         self._set_uniform(program, "u_texture", 0)
+        self._set_uniform(program, "u_base_color", mesh.base_color)
+        self._apply_material_properties(program, mesh.material_properties)
         mesh.vao.render()
         return True
 
     def _load_mesh(self, entity: Entity, component: MeshRenderer) -> RenderMesh | None:
-        cache_key = (component.mesh, component.submesh, component.material, component.shader)
+        cache_key = (component.mesh, component.submesh, component.material, component.shader, tuple(component.source_materials), tuple(component.material_slots))
         if cache_key in self._mesh_cache:
             return self._mesh_cache[cache_key]
         metadata = self._metadata.get(component.mesh)
@@ -329,24 +339,27 @@ class SceneRenderer:
         except Exception as exc:
             self.log(f"Could not build mesh buffer for {entity.name}: {exc}")
             return None
-        program = self._program_for(component.shader)
+        material = component.material or (group.faces[0].material if group.faces else None)
+        material_asset_path = self._material_slot_path(component, metadata, material)
+        material_asset = self._load_material_asset(material_asset_path)
+        shader = material_asset.shader if material_asset is not None else component.shader
+        program = self._program_for(shader)
         try:
-            vao = self.ctx.vertex_array(
-                program,
-                [(buffer, "3f 2f 3f", "in_position", "in_uv", "in_normal")],
-            )
+            vao = self._mesh_vertex_array(program, buffer)
         except Exception as exc:
             self.log(f"Could not bind mesh attributes for {entity.name}: {exc}")
             return None
-        material = component.material or (group.faces[0].material if group.faces else None)
-        texture = self._texture_for(metadata, material)
+        texture = self._texture_for(metadata, material, material_asset, material_asset_path)
+        base_color = self._base_color_for(metadata, obj_mesh, material, material_asset)
         mesh = RenderMesh(
             vao=vao,
             buffer=buffer,
-            vertex_count=len(vertices) // 8,
+            vertex_count=len(vertices) // MESH_VERTEX_FLOATS,
             texture=texture,
             model_matrix=entity.transform.world_matrix(entity),
-            shader=component.shader,
+            shader=shader,
+            base_color=base_color,
+            material_properties=dict(material_asset.properties) if material_asset is not None else None,
         )
         self._mesh_cache[cache_key] = mesh
         return mesh
@@ -385,6 +398,9 @@ class SceneRenderer:
                 self._set_uniform(self.selection_outline_program, "u_outline_width", 0.035)
                 self._set_uniform(self.selection_outline_program, "u_color", (1.0, 0.84, 0.16))
                 outline_vao.render()
+                edge_mesh = self._selection_edge_mesh(mesh, component)
+                if edge_mesh is not None:
+                    self._draw_cached_line_mesh(edge_mesh, view, projection, (1.0, 0.84, 0.16), mesh_entity.transform.world_matrix(mesh_entity))
         except Exception as exc:
             self.log(f"Selection outline render failed: {exc}")
         finally:
@@ -583,12 +599,46 @@ class SceneRenderer:
         try:
             mesh.outline_vao = self.ctx.vertex_array(
                 self.selection_outline_program,
-                [(mesh.buffer, "3f 2f 3f", "in_position", "in_uv", "in_normal")],
+                [(mesh.buffer, MESH_OUTLINE_LAYOUT, "in_position", "in_normal")],
             )
         except Exception as exc:
             self.log(f"Could not bind selection outline mesh: {exc}")
             return None
         return mesh.outline_vao
+
+    def _selection_edge_mesh(self, mesh: RenderMesh, component: MeshRenderer) -> RenderLineMesh | None:
+        if mesh.edge_mesh is not None:
+            return mesh.edge_mesh
+        vertices = _mesh_collider_wire_vertices(self.project, component)
+        if not vertices:
+            return None
+        try:
+            import struct
+
+            buffer = self.ctx.buffer(struct.pack(f"{len(vertices)}f", *vertices))
+            vao = self.ctx.vertex_array(self.line_program, [(buffer, "3f", "in_position")])
+        except Exception as exc:
+            self.log(f"Could not cache selection edge mesh for {component.mesh}: {exc}")
+            return None
+        mesh.edge_mesh = RenderLineMesh(vao=vao, buffer=buffer, vertex_count=len(vertices) // 3)
+        return mesh.edge_mesh
+
+    def _mesh_vertex_array(self, program: Any, buffer: Any) -> Any:
+        bindings = [(buffer, MESH_VERTEX_LAYOUT, "in_position", "in_uv", "in_normal", "in_color")]
+        try:
+            return self.ctx.vertex_array(program, bindings, skip_errors=True)
+        except TypeError:
+            pass
+        except Exception as exc:
+            if "'in_position'" in str(exc) or "in_position" in str(exc):
+                raise
+            return self.ctx.vertex_array(program, [(buffer, MESH_POSITION_ONLY_LAYOUT, "in_position")])
+        try:
+            return self.ctx.vertex_array(program, bindings)
+        except Exception as exc:
+            if "'in_position'" in str(exc) or "in_position" in str(exc):
+                raise
+            return self.ctx.vertex_array(program, [(buffer, MESH_POSITION_ONLY_LAYOUT, "in_position")])
 
     def _program_for(self, shader: str | None) -> Any:
         if not shader:
@@ -626,7 +676,35 @@ class SceneRenderer:
         else:
             uniform.value = value
 
-    def _texture_for(self, metadata: AssetMetadata, material_name: str | None) -> Any:
+    def _base_color_for(
+        self,
+        metadata: AssetMetadata,
+        obj_mesh: Any,
+        material_name: str | None,
+        material_asset: MaterialAsset | None = None,
+    ) -> tuple[float, float, float]:
+        if material_asset is not None and "u_base_color" in material_asset.properties:
+            return _color3(material_asset.properties.get("u_base_color"))
+        if not material_name:
+            return (1.0, 1.0, 1.0)
+        material_defs = metadata.settings.get("material_defs", {})
+        material = material_defs.get(material_name, {})
+        diffuse = material.get("diffuse_color") if isinstance(material, dict) else None
+        if diffuse is None and material_name in obj_mesh.material_defs:
+            diffuse = obj_mesh.material_defs[material_name].diffuse_color
+        return _color3(diffuse)
+
+    def _texture_for(
+        self,
+        metadata: AssetMetadata,
+        material_name: str | None,
+        material_asset: MaterialAsset | None = None,
+        material_asset_path: Path | None = None,
+    ) -> Any:
+        if material_asset is not None:
+            texture_path = self._material_texture_path(material_asset.textures.get("u_texture"), material_asset_path)
+            if texture_path and texture_path.exists():
+                return self._load_texture(texture_path)
         material_defs = metadata.settings.get("material_defs", {})
         texture_name = None
         if material_name and material_name in material_defs:
@@ -636,6 +714,61 @@ class SceneRenderer:
             if path.exists():
                 return self._load_texture(path)
         return self._default_texture()
+
+    def _material_slot_path(self, component: MeshRenderer, metadata: AssetMetadata | None = None, material_name: str | None = None) -> Path | None:
+        material_id = None
+        source_materials = component.source_materials or (list(metadata.materials) if metadata is not None else [])
+        if metadata is not None and material_name and material_name not in source_materials:
+            source_materials = list(metadata.materials)
+        if material_name and material_name in source_materials:
+            index = source_materials.index(material_name)
+            if index < len(component.material_slots):
+                material_id = component.material_slots[index]
+        if not material_id:
+            material_id = next((slot for slot in component.material_slots if slot), None)
+        if not material_id and metadata is not None and material_name:
+            material_assets = metadata.settings.get("material_assets", {})
+            if isinstance(material_assets, dict):
+                material_id = material_assets.get(material_name)
+        if not material_id:
+            return None
+        return resolve_material_reference(self.project.root, str(material_id))
+
+    def _load_material_asset(self, path: Path | None) -> MaterialAsset | None:
+        if path is None or not path.exists():
+            return None
+        try:
+            return MaterialAsset.load(path)
+        except Exception as exc:
+            self.log(f"Could not load material {path}: {exc}")
+            return None
+
+    def _material_texture_path(self, texture_name: str | None, material_asset_path: Path | None) -> Path | None:
+        if not texture_name:
+            return None
+        path = Path(str(texture_name))
+        if path.is_absolute():
+            return path
+        candidates: list[Path] = []
+        if str(texture_name).startswith(("assets/", "packages/")):
+            candidates.append(self.project.root / texture_name)
+        if material_asset_path is not None:
+            candidates.append(material_asset_path.parent / texture_name)
+            metadata = load_material_metadata(material_asset_path)
+            source = metadata.settings.get("source", {}) if metadata else {}
+            obj_source = source.get("obj") if isinstance(source, dict) else None
+            if obj_source:
+                candidates.append((self.project.root / str(obj_source)).parent / texture_name)
+        candidates.append(self.project.assets_dir / texture_name)
+        return next((candidate for candidate in candidates if candidate.exists()), candidates[0] if candidates else None)
+
+    def _apply_material_properties(self, program: Any, properties: dict[str, Any] | None) -> None:
+        if not properties:
+            return
+        for name, value in properties.items():
+            if name == "u_base_color":
+                continue
+            self._set_uniform(program, name, _uniform_value(value))
 
     def _load_texture(self, path: Path) -> Any:
         if path in self._texture_cache:
@@ -663,6 +796,25 @@ class SceneRenderer:
             linear = getattr(self.moderngl, "LINEAR", self.moderngl.NEAREST)
             return (linear, linear)
         return (self.moderngl.NEAREST, self.moderngl.NEAREST)
+
+
+def _color3(value: Any) -> tuple[float, float, float]:
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        try:
+            return (
+                max(0.0, min(1.0, float(value[0]))),
+                max(0.0, min(1.0, float(value[1]))),
+                max(0.0, min(1.0, float(value[2]))),
+            )
+        except (TypeError, ValueError):
+            pass
+    return (1.0, 1.0, 1.0)
+
+
+def _uniform_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(value)
+    return value
 
 
 def _camera_from_entity(camera_entity: Entity | None) -> RenderCamera:

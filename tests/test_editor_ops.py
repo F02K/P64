@@ -4,18 +4,30 @@ import unittest
 
 from p64.build.pipeline import validate_project
 from p64.editor.ops import (
+    AssetOperationError,
     DirtyTracker,
     add_component,
+    create_asset_folder,
+    create_blank_asset_file,
     create_script_template,
     create_shader_template,
+    delete_asset_path,
     delete_entity,
     duplicate_entity,
+    extract_materials_for_obj,
     insert_obj_scene_entity,
     move_component,
     move_script_entry,
+    rename_asset_path,
+    reset_material_asset,
+    update_startup_scene_after_asset_rename,
+    update_material_usage_cache,
 )
+from p64.editor.panels.assets import visible_asset_paths
 from p64.engine.assets import AssetMetadata
 from p64.engine.components import Camera, Collider, EntityPhysics, MeshRenderer, ScriptComponent, ScriptEntry
+from p64.engine.files import find_metadata_for_source
+from p64.engine.material import MaterialAsset, load_material_metadata
 from p64.engine.entity import GAME_OBJECT, Entity
 from p64.engine.project import Project
 from p64.engine.scene import Scene
@@ -76,6 +88,106 @@ class EditorOpsTests(unittest.TestCase):
             script = create_script_template(root / "scripts", "Mover")
             self.assertIn("Vertex", shader.read_text(encoding="utf-8"))
             self.assertIn("class Mover", script.read_text(encoding="utf-8"))
+
+    def test_asset_file_operations_create_unique_folder_and_file_under_assets(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            first_folder = create_asset_folder(project, project.assets_dir)
+            second_folder = create_asset_folder(project, project.assets_dir)
+            first_file = create_blank_asset_file(project, project.assets_dir)
+            second_file = create_blank_asset_file(project, project.assets_dir)
+
+            self.assertEqual(first_folder.name, "New Folder")
+            self.assertEqual(second_folder.name, "New Folder_1")
+            self.assertEqual(first_file.name, "new_file.txt")
+            self.assertEqual(second_file.name, "new_file_1.txt")
+            self.assertTrue(first_folder.is_dir())
+            self.assertEqual(first_file.read_text(encoding="utf-8"), "")
+
+    def test_asset_file_operations_refuse_packages_and_outside_project(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+
+            with self.assertRaises(AssetOperationError):
+                create_blank_asset_file(project, project.packages_dir)
+            with self.assertRaises(AssetOperationError):
+                create_asset_folder(project, outside)
+
+            package_file = project.packages_dir / "readonly.txt"
+            package_file.write_text("keep", encoding="utf-8")
+            with self.assertRaises(AssetOperationError):
+                rename_asset_path(project, package_file, "renamed.txt")
+            with self.assertRaises(AssetOperationError):
+                delete_asset_path(project, package_file)
+
+    def test_asset_rename_rejects_empty_separator_and_collision_names(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            source = create_blank_asset_file(project, project.assets_dir, "source.txt")
+            create_blank_asset_file(project, project.assets_dir, "target.txt")
+
+            for name in ["", "../escape.txt", "folder/name.txt", "target.txt"]:
+                with self.subTest(name=name):
+                    with self.assertRaises(AssetOperationError):
+                        rename_asset_path(project, source, name)
+
+    def test_asset_source_rename_moves_sidecar_and_updates_metadata_source(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            source = project.assets_dir / "model.obj"
+            source.write_text(OBJ_TEXT, encoding="utf-8")
+            metadata = AssetMetadata(id="mesh_model", kind="obj_mesh", source="assets/model.obj")
+            metadata.save(project.assets_dir / "model.obj.mdp64")
+
+            renamed = rename_asset_path(project, source, "renamed.obj")
+
+            self.assertFalse(source.exists())
+            self.assertFalse((project.assets_dir / "model.obj.mdp64").exists())
+            self.assertTrue(renamed.exists())
+            moved_metadata = project.assets_dir / "renamed.obj.mdp64"
+            self.assertTrue(moved_metadata.exists())
+            self.assertEqual(AssetMetadata.load(moved_metadata).source, "assets/renamed.obj")
+
+    def test_asset_folder_rename_updates_nested_metadata_sources(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            folder = project.assets_dir / "Models"
+            folder.mkdir()
+            source = folder / "model.obj"
+            source.write_text(OBJ_TEXT, encoding="utf-8")
+            AssetMetadata(id="mesh_model", kind="obj_mesh", source="assets/Models/model.obj").save(folder / "model.obj.mdp64")
+
+            renamed = rename_asset_path(project, folder, "Renamed")
+
+            self.assertEqual(renamed.name, "Renamed")
+            self.assertEqual(AssetMetadata.load(renamed / "model.obj.mdp64").source, "assets/Renamed/model.obj")
+
+    def test_asset_delete_removes_source_sidecar(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            source = project.assets_dir / "model.obj"
+            source.write_text(OBJ_TEXT, encoding="utf-8")
+            sidecar = project.assets_dir / "model.obj.mdp64"
+            AssetMetadata(id="mesh_model", kind="obj_mesh", source="assets/model.obj").save(sidecar)
+
+            delete_asset_path(project, source)
+
+            self.assertFalse(source.exists())
+            self.assertFalse(sidecar.exists())
+
+    def test_startup_scene_updates_after_asset_rename(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            old_scene = project.resolve_scene_path(project.startup_scene)
+            new_scene = rename_asset_path(project, old_scene, "renamed.scenep64")
+
+            changed = update_startup_scene_after_asset_rename(project, old_scene, new_scene)
+
+            self.assertTrue(changed)
+            self.assertEqual(project.startup_scene, "assets/scenes/renamed.scenep64")
+            self.assertEqual(Project.load(project.root).startup_scene, "assets/scenes/renamed.scenep64")
 
     def test_component_and_script_entry_ordering(self):
         entity = Entity("Root")
@@ -163,6 +275,114 @@ class EditorOpsTests(unittest.TestCase):
             self.assertTrue(entity.children[0].is_game_object)
             renderer = entity.children[0].components[0]
             self.assertIsInstance(renderer, MeshRenderer)
+            self.assertEqual(renderer.source_materials, ["Mat"])
+            self.assertEqual(renderer.material_slots, [None])
+
+    def test_asset_browser_hides_metadata_sidecars(self):
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            visible = folder / "model.obj"
+            hidden = folder / "model.obj.mdp64"
+            visible.write_text("o Body\n", encoding="utf-8")
+            hidden.write_text("{}", encoding="utf-8")
+
+            paths = visible_asset_paths(folder)
+
+            self.assertIn(visible, paths)
+            self.assertNotIn(hidden, paths)
+
+    def test_extract_materials_creates_material_and_sidecar_without_overwrite(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "model.obj"
+            source.write_text(OBJ_TEXT, encoding="utf-8")
+            (root / "model.mtl").write_text("newmtl Mat\nKd 0.25 0.5 0.75\nmap_Kd albedo.png\n", encoding="utf-8")
+            project = Project.create(root / "Game")
+            metadata = extract_materials_for_obj(project, source)
+            material_path = metadata[0]
+            material = MaterialAsset.load(material_path)
+            material.properties["u_base_color"] = [0.9, 0.8, 0.7]
+            material.save(material_path)
+
+            imported_obj = project.assets_dir / root.name / "model.obj"
+            second = extract_materials_for_obj(project, imported_obj)
+
+            self.assertEqual(second, [material_path])
+            self.assertEqual(MaterialAsset.load(material_path).properties["u_base_color"], [0.9, 0.8, 0.7])
+            sidecar = load_material_metadata(material_path)
+            self.assertEqual(sidecar.settings["defaults"]["diffuse_color"], [0.25, 0.5, 0.75])
+            obj_metadata = AssetMetadata.load(find_metadata_for_source(imported_obj))
+            self.assertEqual(obj_metadata.settings["material_assets"]["Mat"], "assets/materials/model/Mat.material")
+            self.assertEqual(obj_metadata.settings["material_extract_folder"], "assets/materials/model")
+
+    def test_extract_materials_uses_chosen_output_folder(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "model.obj"
+            source.write_text(OBJ_TEXT, encoding="utf-8")
+            (root / "model.mtl").write_text("newmtl Mat\nKd 0.2 0.3 0.4\n", encoding="utf-8")
+            project = Project.create(root / "Game")
+            output_dir = project.assets_dir / "Art" / "Materials"
+
+            materials = extract_materials_for_obj(project, source, output_dir)
+
+            self.assertEqual(materials[0], output_dir / "Mat.material")
+            imported_obj = project.assets_dir / root.name / "model.obj"
+            obj_metadata = AssetMetadata.load(find_metadata_for_source(imported_obj))
+            self.assertEqual(obj_metadata.settings["material_assets"]["Mat"], "assets/Art/Materials/Mat.material")
+            self.assertEqual(obj_metadata.settings["material_extract_folder"], "assets/Art/Materials")
+
+    def test_external_material_reference_warns_without_validation_error(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "model.obj"
+            source.write_text(OBJ_TEXT, encoding="utf-8")
+            (root / "model.mtl").write_text("newmtl Mat\nKd 0.2 0.3 0.4\n", encoding="utf-8")
+            project = Project.create(root / "Game")
+            external_dir = root / "ExternalMaterials"
+            material_path = extract_materials_for_obj(project, source, external_dir)[0]
+            scene = project.load_startup_scene()
+            entity = Entity("Body")
+            entity.add_component(MeshRenderer(mesh="mesh_body", source_materials=["Mat"], material_slots=[str(material_path.resolve())]))
+            scene.add_entity(entity)
+            project.save_startup_scene(scene)
+
+            report = validate_project(project.root)
+
+            self.assertFalse(any("Missing material asset" in error for error in report.errors))
+            self.assertTrue(any("external material" in warning for warning in report.warnings))
+
+    def test_material_reset_uses_sidecar_defaults(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "model.obj"
+            source.write_text(OBJ_TEXT, encoding="utf-8")
+            (root / "model.mtl").write_text("newmtl Mat\nKd 0.1 0.2 0.3\n", encoding="utf-8")
+            project = Project.create(root / "Game")
+            material_path = extract_materials_for_obj(project, source)[0]
+            material = MaterialAsset.load(material_path)
+            material.properties["u_base_color"] = [1.0, 1.0, 1.0]
+            material.save(material_path)
+
+            reset_material_asset(project, material_path)
+
+            self.assertEqual(MaterialAsset.load(material_path).properties["u_base_color"], [0.1, 0.2, 0.3])
+
+    def test_material_usage_cache_is_computed_from_scene(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            material_path = project.assets_dir / "materials" / "Paint.material"
+            material_path.parent.mkdir(parents=True)
+            MaterialAsset().save(material_path)
+            entity = Entity("Body")
+            entity.add_component(MeshRenderer(mesh="mesh_body", submesh="Body", material_slots=["assets/materials/Paint.material"]))
+            scene = Scene("Scene", [entity])
+
+            update_material_usage_cache(project, scene, project.assets_dir / "scenes" / "main.scenep64")
+
+            usage = load_material_metadata(material_path).settings["usage_cache"]
+            self.assertEqual(usage[0]["entity"], "Body")
+            self.assertEqual(usage[0]["submesh"], "Body")
 
     def test_validation_reports_missing_texture(self):
         with TemporaryDirectory() as tmp:

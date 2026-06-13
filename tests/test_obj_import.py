@@ -3,7 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from p64.engine.assets import discover_assets
-from p64.engine.obj import import_obj_to_project, parse_mtl, parse_obj
+from p64.engine.obj import import_obj_to_project, mesh_vertices_for_group, parse_mtl, parse_obj
 from p64.engine.project import Project
 
 
@@ -32,6 +32,60 @@ class ObjImportTests(unittest.TestCase):
             self.assertEqual(mesh.group_names, ["Floor", "Door"])
             self.assertEqual(len(mesh.groups[0].faces), 2)
             self.assertEqual(len(mesh.groups[1].faces), 1)
+
+    def test_parse_obj_preserves_optional_vertex_colors(self):
+        with TemporaryDirectory() as tmp:
+            obj = Path(tmp) / "colored.obj"
+            obj.write_text(
+                "o Body\n"
+                "v 0 0 0 1 0.5 0\n"
+                "v 1 0 0 0 1 0.5\n"
+                "v 0 1 0 0.25 0 1\n"
+                "f 1 2 3\n",
+                encoding="utf-8",
+            )
+            mesh = parse_obj(obj)
+            vertices = mesh.groups[0].faces[0].vertices
+
+            self.assertEqual(vertices[0].color, (1.0, 0.5, 0.0))
+            self.assertEqual(vertices[1].color, (0.0, 1.0, 0.5))
+            self.assertEqual(vertices[2].color, (0.25, 0.0, 1.0))
+
+            packed = mesh_vertices_for_group(mesh.groups[0])
+            self.assertEqual(packed[8:11], [1.0, 0.5, 0.0])
+
+    def test_parse_obj_accepts_byte_sized_vertex_colors(self):
+        with TemporaryDirectory() as tmp:
+            obj = Path(tmp) / "colored.obj"
+            obj.write_text(
+                "o Body\n"
+                "v 0 0 0 255 128 0\n"
+                "v 1 0 0 0 255 128\n"
+                "v 0 1 0 64 0 255\n"
+                "f 1 2 3\n",
+                encoding="utf-8",
+            )
+            mesh = parse_obj(obj)
+
+            self.assertEqual(mesh.groups[0].faces[0].vertices[0].color, (1.0, 128.0 / 255.0, 0.0))
+
+    def test_mesh_vertex_data_defaults_color_to_white(self):
+        with TemporaryDirectory() as tmp:
+            obj = Path(tmp) / "plain.obj"
+            obj.write_text(
+                "o Body\n"
+                "v 0 0 0\n"
+                "v 1 0 0\n"
+                "v 0 1 0\n"
+                "f 1 2 3\n",
+                encoding="utf-8",
+            )
+            mesh = parse_obj(obj)
+
+            vertices = mesh_vertices_for_group(mesh.groups[0])
+
+            self.assertEqual(len(vertices), 33)
+            self.assertEqual(vertices[8:11], [1.0, 1.0, 1.0])
 
     def test_import_obj_adds_metadata_and_scene_nodes(self):
         with TemporaryDirectory() as tmp:

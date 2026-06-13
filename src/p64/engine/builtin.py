@@ -16,14 +16,26 @@ STANDARD_UNLIT_SHADER_NAME = "P64Builtin/Standard Unlit"
 STANDARD_SHADER_RELATIVE = f"packages/{BUILTIN_PACKAGE_NAME}/shaders/standard_vertex_lit.shader"
 STANDARD_UNLIT_SHADER_RELATIVE = f"packages/{BUILTIN_PACKAGE_NAME}/shaders/standard_unlit.shader"
 LEGACY_STANDARD_SHADER_RELATIVE = f"packages/{BUILTIN_PACKAGE_NAME}/shaders/standard_" + "n" + "64.shader"
+BUILTIN_MATERIAL_PROPERTIES = (
+    'Texture u_texture = ""',
+    "Color u_base_color = (1.0, 1.0, 1.0)",
+)
 
 
 def ensure_builtin_package(project_root: Path) -> None:
     package = project_root / "packages" / BUILTIN_PACKAGE_NAME
     for folder in ["shaders", "materials", "scripts", "editor"]:
         (package / folder).mkdir(parents=True, exist_ok=True)
-    _write_if_missing(project_root / STANDARD_SHADER_RELATIVE, standard_vertex_lit_shader_source())
-    _write_if_missing(project_root / STANDARD_UNLIT_SHADER_RELATIVE, standard_unlit_shader_source())
+    _write_generated_shader(
+        project_root / STANDARD_SHADER_RELATIVE,
+        standard_vertex_lit_shader_source(),
+        STANDARD_VERTEX_LIT_SHADER_NAME,
+    )
+    _write_generated_shader(
+        project_root / STANDARD_UNLIT_SHADER_RELATIVE,
+        standard_unlit_shader_source(),
+        STANDARD_UNLIT_SHADER_NAME,
+    )
     _remove_generated_legacy_shader(project_root / LEGACY_STANDARD_SHADER_RELATIVE)
 
 
@@ -53,6 +65,10 @@ def _shader_source(name: str, vertex: str, fragment: str) -> str:
     return (
         f'Shader "{name}"\n'
         "{\n"
+        "    Properties\n"
+        "    {\n"
+        f"{_indent_lines(BUILTIN_MATERIAL_PROPERTIES)}\n"
+        "    }\n\n"
         "    Vertex\n"
         "    {\n"
         f"{_indent(vertex.strip())}\n"
@@ -65,8 +81,15 @@ def _shader_source(name: str, vertex: str, fragment: str) -> str:
     )
 
 
-def _write_if_missing(path: Path, source: str) -> None:
+def _write_generated_shader(path: Path, source: str, shader_name: str) -> None:
     if not path.exists():
+        path.write_text(source, encoding="utf-8")
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if f'Shader "{shader_name}"' in text:
         path.write_text(source, encoding="utf-8")
 
 
@@ -83,3 +106,7 @@ def _remove_generated_legacy_shader(path: Path) -> None:
 
 def _indent(text: str) -> str:
     return "\n".join(f"        {line}" for line in text.splitlines())
+
+
+def _indent_lines(lines: tuple[str, ...]) -> str:
+    return "\n".join(f"        {line}" for line in lines)

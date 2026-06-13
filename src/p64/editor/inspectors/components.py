@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 from typing import Any
 
 from p64.editor.ops import (
     add_component,
+    extract_materials_for_obj,
     move_component as move_component_in_entity,
     move_script_entry as move_script_entry_in_component,
+    reset_material_asset,
     split_mesh_renderer_into_children,
 )
 from p64.editor.panels.assets import is_preview_image
@@ -18,6 +21,8 @@ from p64.engine.collision import apply_mesh_primitive_defaults
 from p64.engine.components import Camera, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, ScriptEntry, SpawnPoint
 from p64.engine.entity import ENTITY, GAME_OBJECT, Entity, set_object_type_recursive
 from p64.engine.files import is_metadata_file
+from p64.engine.files import find_metadata_for_source
+from p64.engine.material import MaterialAsset, is_material_file, load_material_metadata, material_asset_id, resolve_material_reference
 from p64.engine.math import Vec3
 from p64.engine.shader import discover_shaders, normalize_shader_id, parse_shader, shader_asset_id
 from p64.engine.validation import entity_reference_errors
@@ -59,6 +64,7 @@ def create_inspector_mixin(
     QLineEdit: Any,
     QMenu: Any,
     QMessageBox: Any,
+    QFileDialog: Any,
     QPixmap: Any,
     QPushButton: Any,
     QSizePolicy: Any,
@@ -135,6 +141,9 @@ def create_inspector_mixin(
                 else:
                     self.inspector_layout.addWidget(QLabel(component_summary(component), self.inspector))
             self._add_component_controls()
+            for component in self.selected.components:
+                if isinstance(component, MeshRenderer):
+                    self._add_material_slots_editor(component)
             self.inspector_layout.addStretch(1)
 
         def _populate_asset_inspector(self, path: Path) -> None:
@@ -191,11 +200,16 @@ def create_inspector_mixin(
                     shader_form.addRow("Name", QLabel(shader.name, self.inspector))
                     shader_form.addRow("Vertex", QLabel(f"{len(shader.vertex.splitlines())} lines", self.inspector))
                     shader_form.addRow("Fragment", QLabel(f"{len(shader.fragment.splitlines())} lines", self.inspector))
+                    shader_form.addRow("Properties", QLabel(str(len(shader.properties)), self.inspector))
                     shader_box = QGroupBox("Shader", self.inspector)
                     shader_box.setLayout(shader_form)
                     self.inspector_layout.addWidget(shader_box)
                 except Exception as exc:
                     self.inspector_layout.addWidget(QLabel(f"Shader parse error: {exc}", self.inspector))
+            elif path.suffix.lower() == ".obj":
+                self._add_obj_asset_inspector(path)
+            elif is_material_file(path):
+                self._add_material_asset_inspector(path)
             self.inspector_layout.addStretch(1)
 
         def _add_entity_header(self) -> None:
@@ -305,15 +319,11 @@ def create_inspector_mixin(
             form.addRow("Visible", visible)
             form.addRow("Mesh", mesh_combo)
             form.addRow("Submesh", submesh_combo)
-            form.addRow("Material", material_combo)
-            shader_combo = self._search_combo([label for label, _path in self._shader_choices()])
-            shader_label_by_id = {shader_id: label for label, shader_id in self._shader_choices()}
-            shader_label_to_id = dict(self._shader_choices())
-            shader_combo.addItem("Standard VertexLit")
-            component.shader = normalize_shader_id(component.shader)
-            shader_combo.setCurrentText(shader_label_by_id.get(component.shader or "", "Standard VertexLit"))
-            shader_combo.currentTextChanged.connect(lambda text: self._set_mesh_shader(component, text, shader_label_to_id))
-            form.addRow("Shader", shader_combo)
+            form.addRow("OBJ Material", material_combo)
+            source_materials = self._source_materials_for_component(component)
+            source_label = QLabel(", ".join(source_materials) or "None", content)
+            source_label.setWordWrap(True)
+            form.addRow("Source Materials", source_label)
             texture_label = QLabel(self._texture_summary(component), content)
             texture_label.setWordWrap(True)
             form.addRow("Texture", texture_label)
@@ -326,6 +336,138 @@ def create_inspector_mixin(
             split_button.clicked.connect(lambda: self._split_mesh_renderer(component))
             form.addRow("Sub-objects", split_button)
             self.inspector_layout.addWidget(self._component_panel(component, "MeshRenderer", content))
+
+        def _add_obj_asset_inspector(self, path: Path) -> None:
+            if not self.project:
+                return
+            metadata_path = find_metadata_for_source(path)
+            if not metadata_path or not metadata_path.exists():
+                return
+            try:
+                metadata = AssetMetadata.load(metadata_path)
+            except Exception as exc:
+                self.inspector_layout.addWidget(QLabel(f"OBJ metadata error: {exc}", self.inspector))
+                return
+            material_defs = metadata.settings.get("material_defs", {})
+            material_assets = metadata.settings.get("material_assets", {})
+            form = QFormLayout()
+            form.addRow("Groups", QLabel(", ".join(metadata.groups) or "None", self.inspector))
+            form.addRow("Materials", QLabel(", ".join(metadata.materials) or "None", self.inspector))
+            extracted = sum(1 for name in metadata.materials if isinstance(material_assets, dict) and material_assets.get(name))
+            form.addRow("Extracted", QLabel(f"{extracted}/{len(metadata.materials)}", self.inspector))
+            texture_names = []
+            for name in metadata.materials:
+                material = material_defs.get(name, {})
+                if isinstance(material, dict) and material.get("diffuse_texture"):
+                    texture_names.append(f"{name}: {material.get('diffuse_texture')}")
+            texture_label = QLabel("\n".join(texture_names) or "None", self.inspector)
+            texture_label.setWordWrap(True)
+            form.addRow("Textures", texture_label)
+            extract = QPushButton("Extract Materials", self.inspector)
+            extract.clicked.connect(lambda: self._extract_materials(path))
+            form.addRow("Materials", extract)
+            box = QGroupBox("OBJ Import", self.inspector)
+            box.setLayout(form)
+            self.inspector_layout.addWidget(box)
+
+        def _add_material_asset_inspector(self, path: Path) -> None:
+            if not self.project:
+                return
+            try:
+                material = MaterialAsset.load(path)
+            except Exception as exc:
+                self.inspector_layout.addWidget(QLabel(f"Material error: {exc}", self.inspector))
+                return
+            content = QWidget(self.inspector)
+            layout = QVBoxLayout(content)
+            layout.setContentsMargins(8, 6, 8, 8)
+            self._add_material_editor_fields(layout, path, material)
+            reset = QPushButton("Reset From MTL Defaults", content)
+            reset.clicked.connect(lambda: self._reset_material(path))
+            layout.addWidget(reset)
+            metadata = load_material_metadata(path)
+            usage = metadata.settings.get("usage_cache", []) if metadata else []
+            if usage:
+                used_by = QLabel("\n".join(f"{item.get('scene', '')}: {item.get('entity', '')}" for item in usage), content)
+                used_by.setWordWrap(True)
+                layout.addWidget(used_by)
+            self.inspector_layout.addWidget(self._foldout_panel("Material", f"asset:{path}:material", content))
+
+        def _add_material_editor_fields(self, layout: Any, path: Path, material: MaterialAsset | None = None) -> None:
+            if not self.project:
+                return
+            try:
+                material = material or MaterialAsset.load(path)
+            except Exception as exc:
+                layout.addWidget(QLabel(f"Material error: {exc}", self.inspector))
+                return
+            parent = self.inspector
+            form = QFormLayout()
+            shader_choices = self._shader_choices()
+            shader_combo = self._search_combo([label for label, _path in shader_choices])
+            shader_label_by_id = {shader_id: label for label, shader_id in shader_choices}
+            shader_label_to_id = dict(shader_choices)
+            shader_combo.setCurrentText(shader_label_by_id.get(material.shader, material.shader))
+            shader_combo.currentTextChanged.connect(lambda text: self._set_material_shader(path, material, text, shader_label_to_id))
+            form.addRow("Shader", shader_combo)
+            layout.addLayout(form)
+
+            prop_form = QFormLayout()
+            shader_path = self.project.root / material.shader
+            try:
+                shader = parse_shader(shader_path)
+                properties = shader.properties
+            except Exception:
+                properties = []
+            for prop in properties:
+                if prop.kind == "texture":
+                    value = material.textures.get(prop.name, str(prop.default or ""))
+                    edit = QLineEdit(str(value), parent)
+                    edit.editingFinished.connect(lambda edit=edit, name=prop.name: self._apply_material_texture(path, material, name, edit.text()))
+                    prop_form.addRow(prop.name, edit)
+                else:
+                    value = material.properties.get(prop.name, prop.default)
+                    edit = QLineEdit(json.dumps(value) if isinstance(value, (list, dict)) else str(value), parent)
+                    edit.editingFinished.connect(lambda edit=edit, name=prop.name: self._apply_material_property(path, material, name, edit.text()))
+                    prop_form.addRow(prop.name, edit)
+            if prop_form.rowCount() == 0:
+                prop_form.addRow("Properties", QLabel("No shader properties", parent))
+            prop_box = QGroupBox("Properties", parent)
+            prop_box.setLayout(prop_form)
+            layout.addWidget(prop_box)
+
+        def _add_material_slots_editor(self, component: MeshRenderer) -> None:
+            content = QWidget(self.inspector)
+            layout = QVBoxLayout(content)
+            layout.setContentsMargins(8, 6, 8, 8)
+            source_materials = self._source_materials_for_component(component)
+            slot_count = max(1, len(component.material_slots), len(source_materials))
+            while len(component.material_slots) < slot_count:
+                component.material_slots.append(None)
+            choices = self._material_choices()
+            labels = ["None"] + [label for label, _path in choices]
+            label_by_id = {material_id: label for label, material_id in choices}
+            label_to_id = dict(choices)
+            for index in range(slot_count):
+                row_box = QGroupBox(source_materials[index] if index < len(source_materials) else f"Slot {index}", content)
+                row_layout = QVBoxLayout(row_box)
+                row_layout.setContentsMargins(8, 6, 8, 8)
+                row_form = QFormLayout()
+                combo = self._search_combo(labels)
+                current = component.material_slots[index]
+                combo.setCurrentText(label_by_id.get(current or "", current or "None"))
+                combo.currentTextChanged.connect(lambda text, index=index: self._set_material_slot(component, index, text, label_to_id))
+                row_form.addRow("Material", combo)
+                row_layout.addLayout(row_form)
+                material_path = resolve_material_reference(self.project.root, current) if self.project else None
+                if material_path and material_path.exists():
+                    self._add_material_editor_fields(row_layout, material_path)
+                else:
+                    fallback = QLabel("Using MTL Defaults / Standard VertexLit", row_box)
+                    fallback.setWordWrap(True)
+                    row_layout.addWidget(fallback)
+                layout.addWidget(row_box)
+            self.inspector_layout.addWidget(self._foldout_panel("Materials", f"{id(component)}:Materials", content))
 
         def _add_fog_editor(self, component: Fog) -> None:
             content, form = self._component_content_widget()
@@ -367,19 +509,19 @@ def create_inspector_mixin(
             kind.currentTextChanged.connect(lambda text: self._set_light_kind(component, text))
             intensity = QLineEdit(str(component.intensity), content)
             intensity.editingFinished.connect(lambda: self._apply_float(intensity, component, "intensity"))
-            range_edit = QLineEdit(str(component.range), content)
-            range_edit.editingFinished.connect(lambda: self._apply_float(range_edit, component, "range"))
-            falloff = QLineEdit(str(component.falloff), content)
-            falloff.editingFinished.connect(lambda: self._apply_float(falloff, component, "falloff"))
-            spot_angle = QLineEdit(str(component.spot_angle), content)
-            spot_angle.editingFinished.connect(lambda: self._apply_float(spot_angle, component, "spot_angle"))
             form.addRow("Kind", kind)
             form.addRow("Color", self._vec3_editor(component.color))
             form.addRow("Intensity", intensity)
             if component.kind in {"point", "spot"}:
+                range_edit = QLineEdit(str(component.range), content)
+                range_edit.editingFinished.connect(lambda: self._apply_float(range_edit, component, "range"))
+                falloff = QLineEdit(str(component.falloff), content)
+                falloff.editingFinished.connect(lambda: self._apply_float(falloff, component, "falloff"))
                 form.addRow("Range", range_edit)
                 form.addRow("Falloff", falloff)
             if component.kind == "spot":
+                spot_angle = QLineEdit(str(component.spot_angle), content)
+                spot_angle.editingFinished.connect(lambda: self._apply_float(spot_angle, component, "spot_angle"))
                 form.addRow("Spot Angle", spot_angle)
             self.inspector_layout.addWidget(self._component_panel(component, "Light", content))
 
@@ -896,6 +1038,7 @@ def create_inspector_mixin(
                 component.mesh = metadata.id
                 component.submesh = metadata.groups[0] if metadata.groups else None
                 component.material = metadata.materials[0] if metadata.materials else None
+                self._sync_mesh_materials(component, metadata)
             self.selected.add_component(component)
             self._mark_dirty()
             self._populate_inspector()
@@ -1033,6 +1176,25 @@ def create_inspector_mixin(
                     return metadata
             return None
 
+        def _source_materials_for_component(self, component: MeshRenderer) -> list[str]:
+            if component.source_materials:
+                return list(component.source_materials)
+            metadata = self._metadata_for_mesh(component.mesh)
+            if metadata:
+                return list(metadata.materials)
+            return []
+
+        def _sync_mesh_materials(self, component: MeshRenderer, metadata: AssetMetadata | None = None) -> None:
+            metadata = metadata or self._metadata_for_mesh(component.mesh)
+            component.source_materials = list(metadata.materials) if metadata else []
+            material_assets = metadata.settings.get("material_assets", {}) if metadata else {}
+            slots: list[str | None] = []
+            for index, material in enumerate(component.source_materials):
+                existing = component.material_slots[index] if index < len(component.material_slots) else None
+                mapped = material_assets.get(material) if isinstance(material_assets, dict) else None
+                slots.append(existing or (str(mapped) if mapped else None))
+            component.material_slots = slots
+
         def _populate_mesh_dependent_combos(self, component: MeshRenderer, submesh_combo: Any, material_combo: Any) -> None:
             metadata = self._metadata_for_mesh(component.mesh)
             submesh_combo.blockSignals(True)
@@ -1069,6 +1231,7 @@ def create_inspector_mixin(
             component.mesh = metadata.id
             component.submesh = metadata.groups[0] if metadata.groups else None
             component.material = metadata.materials[0] if metadata.materials else None
+            self._sync_mesh_materials(component, metadata)
             self._populate_mesh_dependent_combos(component, submesh_combo, material_combo)
             self._mark_dirty()
             self.viewport.reload_assets()
@@ -1080,6 +1243,9 @@ def create_inspector_mixin(
 
         def _set_mesh_material(self, component: MeshRenderer, value: str) -> None:
             component.material = value or None
+            metadata = self._metadata_for_mesh(component.mesh)
+            if metadata and not component.source_materials:
+                self._sync_mesh_materials(component, metadata)
             self._mark_dirty()
             self.viewport.reload_assets()
 
@@ -1087,6 +1253,88 @@ def create_inspector_mixin(
             component.shader = normalize_shader_id(label_to_id.get(label))
             self._mark_dirty()
             self.viewport.reload_assets()
+
+        def _set_material_slot(self, component: MeshRenderer, index: int, label: str, label_to_id: dict[str, str]) -> None:
+            while len(component.material_slots) <= index:
+                component.material_slots.append(None)
+            component.material_slots[index] = label_to_id.get(label) if label != "None" else None
+            if component.material_slots[index] is None and label not in {"", "None"}:
+                component.material_slots[index] = label
+            self._mark_dirty()
+            self._populate_inspector()
+            self.viewport.reload_assets()
+
+        def _set_material_shader(self, path: Path, material: MaterialAsset, label: str, label_to_id: dict[str, str]) -> None:
+            shader = normalize_shader_id(label_to_id.get(label) or label)
+            if not shader:
+                return
+            material.shader = shader
+            material.save(path)
+            self._populate_inspector()
+            self.viewport.reload_assets()
+
+        def _apply_material_property(self, path: Path, material: MaterialAsset, name: str, text: str) -> None:
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError:
+                try:
+                    value = float(text)
+                except ValueError:
+                    value = text
+            material.properties[name] = value
+            material.save(path)
+            self.viewport.reload_assets()
+
+        def _apply_material_texture(self, path: Path, material: MaterialAsset, name: str, text: str) -> None:
+            material.textures[name] = text
+            material.save(path)
+            self.viewport.reload_assets()
+
+        def _reset_material(self, path: Path) -> None:
+            if not self.project:
+                return
+            reset_material_asset(self.project, path)
+            self._populate_inspector()
+            self.viewport.reload_assets()
+
+        def _extract_materials(self, path: Path) -> None:
+            if not self.project:
+                return
+            start = self._material_extract_start_folder(path)
+            folder = QFileDialog.getExistingDirectory(self, "Extract Materials To", str(start))
+            if not folder:
+                return
+            output_dir = Path(folder)
+            try:
+                output_dir.resolve().relative_to(self.project.assets_dir.resolve())
+            except ValueError:
+                QMessageBox.warning(
+                    self,
+                    "External Material Folder",
+                    "This folder is outside Assets. Materials will work by absolute path, but they will not appear in the Asset Browser.",
+                )
+            try:
+                materials = extract_materials_for_obj(self.project, path, output_dir)
+                self._refresh_assets_from_watcher()
+                self._populate_inspector()
+                self._log(f"Extracted {len(materials)} material(s) from {path.name}.")
+            except Exception as exc:
+                self._log(f"Extract materials failed: {exc}")
+
+        def _material_extract_start_folder(self, path: Path) -> Path:
+            if not self.project:
+                return path.parent
+            metadata_path = find_metadata_for_source(path)
+            if metadata_path and metadata_path.exists():
+                try:
+                    metadata = AssetMetadata.load(metadata_path)
+                    folder = metadata.settings.get("material_extract_folder")
+                    if folder:
+                        candidate = Path(str(folder))
+                        return candidate if candidate.is_absolute() else self.project.root / candidate
+                except Exception:
+                    pass
+            return self.project.assets_dir / "materials" / path.stem
 
         def _split_mesh_renderer(self, component: MeshRenderer) -> None:
             if not self.selected:
@@ -1113,6 +1361,15 @@ def create_inspector_mixin(
                     label = f"{shader_path.stem}  ({shader_id})"
                 choices.append((label, shader_id))
             return choices
+
+        def _material_choices(self) -> list[tuple[str, str]]:
+            if not self.project or not self.project.assets_dir.exists():
+                return []
+            choices: list[tuple[str, str]] = []
+            for path in self.project.assets_dir.rglob("*.material"):
+                material_id = material_asset_id(self.project.root, path)
+                choices.append((f"{path.stem}  ({material_id})", material_id))
+            return sorted(choices)
 
         def _texture_summary(self, component: MeshRenderer) -> str:
             texture = self._texture_path_for(component)

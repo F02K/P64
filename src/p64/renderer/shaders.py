@@ -5,6 +5,7 @@ const int P64_MAX_LIGHTS = 8;
 in vec3 in_position;
 in vec2 in_uv;
 in vec3 in_normal;
+in vec3 in_color;
 
 uniform mat4 u_model;
 uniform mat4 u_view;
@@ -21,6 +22,7 @@ uniform float u_light_falloff[P64_MAX_LIGHTS];
 uniform vec3 u_ambient_color;
 
 out vec2 v_uv;
+out vec3 v_color;
 out vec3 v_light;
 out vec3 v_world_pos;
 
@@ -65,6 +67,7 @@ void main() {
     }
     v_light = clamp(light, vec3(0.0), vec3(1.6));
     v_uv = in_uv;
+    v_color = in_color;
     v_world_pos = world_pos.xyz;
     gl_Position = u_projection * u_view * world_pos;
 }
@@ -83,7 +86,10 @@ uniform float u_fog_far;
 uniform float u_fog_density;
 uniform float u_color_levels;
 uniform int u_texture_filter;
+uniform bool u_dithering_enabled;
+uniform vec3 u_base_color;
 in vec2 v_uv;
+in vec3 v_color;
 in vec3 v_light;
 in vec3 v_world_pos;
 out vec4 fragColor;
@@ -102,10 +108,32 @@ vec4 sample_three_point(sampler2D tex, vec2 uv) {
     return c00 + (c10 - c00) * fraction.x + (c01 - c00) * fraction.y;
 }
 
+float dither_threshold(vec2 position) {
+    int x = int(mod(position.x, 4.0));
+    int y = int(mod(position.y, 4.0));
+    int index = x + y * 4;
+    float values[16] = float[16](
+        0.0, 8.0, 2.0, 10.0,
+        12.0, 4.0, 14.0, 6.0,
+        3.0, 11.0, 1.0, 9.0,
+        15.0, 7.0, 13.0, 5.0
+    );
+    return (values[index] / 16.0) - 0.5;
+}
+
+vec3 quantize_color(vec3 color) {
+    float levels = max(u_color_levels, 2.0);
+    vec3 adjusted = color;
+    if (u_dithering_enabled) {
+        adjusted += vec3(dither_threshold(gl_FragCoord.xy) / levels);
+    }
+    return floor(clamp(adjusted, vec3(0.0), vec3(1.0)) * levels) / levels;
+}
+
 void main() {
     vec4 texel = u_texture_filter == 2 ? sample_three_point(u_texture, v_uv) : texture(u_texture, v_uv);
-    vec3 lit = texel.rgb * v_light;
-    vec3 quantized = floor(lit * u_color_levels) / u_color_levels;
+    vec3 lit = texel.rgb * u_base_color * v_color * v_light;
+    vec3 quantized = quantize_color(lit);
     vec3 half_size = max(u_fog_size * 0.5, vec3(0.001));
     vec3 volume_pos = abs(v_world_pos - u_fog_center) / half_size;
     float inside_volume = 1.0 - smoothstep(0.92, 1.0, max(max(volume_pos.x, volume_pos.y), volume_pos.z));
@@ -121,14 +149,17 @@ STANDARD_UNLIT_VERTEX_SHADER = """
 in vec3 in_position;
 in vec2 in_uv;
 in vec3 in_normal;
+in vec3 in_color;
 uniform mat4 u_model;
 uniform mat4 u_view;
 uniform mat4 u_projection;
 out vec2 v_uv;
+out vec3 v_color;
 out vec3 v_world_pos;
 void main() {
     vec4 world_pos = u_model * vec4(in_position + in_normal * 0.0, 1.0);
     v_uv = in_uv;
+    v_color = in_color;
     v_world_pos = world_pos.xyz;
     gl_Position = u_projection * u_view * world_pos;
 }
@@ -147,7 +178,10 @@ uniform float u_fog_far;
 uniform float u_fog_density;
 uniform float u_color_levels;
 uniform int u_texture_filter;
+uniform bool u_dithering_enabled;
+uniform vec3 u_base_color;
 in vec2 v_uv;
+in vec3 v_color;
 in vec3 v_world_pos;
 out vec4 fragColor;
 
@@ -165,9 +199,31 @@ vec4 sample_three_point(sampler2D tex, vec2 uv) {
     return c00 + (c10 - c00) * fraction.x + (c01 - c00) * fraction.y;
 }
 
+float dither_threshold(vec2 position) {
+    int x = int(mod(position.x, 4.0));
+    int y = int(mod(position.y, 4.0));
+    int index = x + y * 4;
+    float values[16] = float[16](
+        0.0, 8.0, 2.0, 10.0,
+        12.0, 4.0, 14.0, 6.0,
+        3.0, 11.0, 1.0, 9.0,
+        15.0, 7.0, 13.0, 5.0
+    );
+    return (values[index] / 16.0) - 0.5;
+}
+
+vec3 quantize_color(vec3 color) {
+    float levels = max(u_color_levels, 2.0);
+    vec3 adjusted = color;
+    if (u_dithering_enabled) {
+        adjusted += vec3(dither_threshold(gl_FragCoord.xy) / levels);
+    }
+    return floor(clamp(adjusted, vec3(0.0), vec3(1.0)) * levels) / levels;
+}
+
 void main() {
     vec4 texel = u_texture_filter == 2 ? sample_three_point(u_texture, v_uv) : texture(u_texture, v_uv);
-    vec3 quantized = floor(texel.rgb * u_color_levels) / u_color_levels;
+    vec3 quantized = quantize_color(texel.rgb * u_base_color * v_color);
     vec3 half_size = max(u_fog_size * 0.5, vec3(0.001));
     vec3 volume_pos = abs(v_world_pos - u_fog_center) / half_size;
     float inside_volume = 1.0 - smoothstep(0.92, 1.0, max(max(volume_pos.x, volume_pos.y), volume_pos.z));

@@ -106,6 +106,7 @@ class Project:
             editor_settings=dict(data.get("editor_settings", {})),
         )
         project.apply_default_settings()
+        project.ensure_layout()
         return project
 
     def ensure_layout(self) -> None:

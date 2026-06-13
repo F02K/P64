@@ -4,7 +4,19 @@ import os
 from pathlib import Path
 from typing import Any
 
-from p64.editor.ops import create_script_template, create_shader_template, insert_obj_scene_entity
+from p64.editor.ops import (
+    AssetOperationError,
+    asset_path_is_editable,
+    create_asset_folder,
+    create_blank_asset_file,
+    create_script_template,
+    create_shader_template,
+    delete_asset_path,
+    insert_obj_scene_entity,
+    is_project_startup_scene,
+    rename_asset_path,
+    update_startup_scene_after_asset_rename,
+)
 from p64.engine.assets import AssetMetadata
 from p64.engine.files import is_metadata_file, is_scene_file
 from p64.engine.project import Project
@@ -18,6 +30,16 @@ def asset_roots(project: Project) -> list[tuple[str, Path]]:
 
 def is_preview_image(path: Path) -> bool:
     return path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}
+
+
+def visible_asset_paths(folder: Path) -> list[Path]:
+    if not folder.exists():
+        return []
+    return [
+        path
+        for path in sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        if not (path.is_file() and is_metadata_file(path))
+    ]
 
 
 def create_asset_browser_mixin(
@@ -65,14 +87,20 @@ def create_asset_browser_mixin(
                 self._add_asset_folder_children(child, path)
 
         def _populate_asset_grid(self) -> None:
+            self._updating_asset_grid = True
             self.assets.clear()
             folder = self.current_asset_folder
-            if not folder or not folder.exists():
-                return
-            for path in sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-                item = QListWidgetItem(self._icon_for_asset(path), path.name)
-                item.setData(Qt.UserRole, str(path))
-                self.assets.addItem(item)
+            try:
+                if not folder or not folder.exists():
+                    return
+                for path in visible_asset_paths(folder):
+                    item = QListWidgetItem(self._icon_for_asset(path), path.name)
+                    item.setData(Qt.UserRole, str(path))
+                    if self.project and asset_path_is_editable(self.project, path):
+                        item.setFlags(item.flags() | Qt.ItemIsEditable)
+                    self.assets.addItem(item)
+            finally:
+                self._updating_asset_grid = False
 
         def _icon_for_asset(self, path: Path) -> Any:
             if path.is_dir():
@@ -125,7 +153,13 @@ def create_asset_browser_mixin(
         def _show_asset_menu(self, pos: Any) -> None:
             path = self._selected_asset_path()
             menu = QMenu(self)
-            if path and (path.suffix.lower() == ".obj" or is_metadata_file(path)):
+            can_create = self._asset_folder_is_editable(self.current_asset_folder)
+            can_modify = path is not None and self._asset_path_can_be_modified(path)
+            if can_create:
+                menu.addAction("New Folder", self._create_asset_folder)
+                menu.addAction("New File", self._create_blank_asset_file)
+                menu.addSeparator()
+            if path and path.suffix.lower() == ".obj":
                 menu.addAction("Import OBJ into Scene", lambda: self._import_asset_obj(path))
             if path and is_scene_file(path):
                 menu.addAction("Open Scene", lambda: self._open_scene_asset(path))
@@ -138,7 +172,24 @@ def create_asset_browser_mixin(
                 menu.addSeparator()
                 menu.addAction("Open", lambda: self._open_path(path))
                 menu.addAction("Reveal in Explorer", lambda: self._reveal_path(path))
+                if can_modify:
+                    menu.addSeparator()
+                    menu.addAction("Rename", lambda: self._begin_asset_rename(path))
+                    menu.addAction("Delete", lambda: self._delete_asset_path(path))
             menu.exec(self.assets.viewport().mapToGlobal(pos))
+
+        def _show_asset_folder_menu(self, pos: Any) -> None:
+            item = self.asset_folders.itemAt(pos)
+            folder = Path(item.data(0, Qt.UserRole)) if item and item.data(0, Qt.UserRole) else self.current_asset_folder
+            menu = QMenu(self)
+            if self._asset_folder_is_editable(folder):
+                menu.addAction("New Folder", lambda: self._create_asset_folder(folder))
+                menu.addAction("New File", lambda: self._create_blank_asset_file(folder))
+            menu.addAction("Refresh Assets", self._refresh_assets_from_watcher)
+            if folder:
+                menu.addSeparator()
+                menu.addAction("Reveal in Explorer", lambda: self._reveal_path(folder))
+            menu.exec(self.asset_folders.viewport().mapToGlobal(pos))
 
         def _asset_double_clicked(self, item: Any) -> None:
             path = Path(item.data(Qt.UserRole))
@@ -147,7 +198,7 @@ def create_asset_browser_mixin(
                 self._select_asset_folder_item(path)
                 self._populate_asset_grid()
                 return
-            if path.suffix.lower() == ".obj" or is_metadata_file(path):
+            if path.suffix.lower() == ".obj":
                 self._import_asset_obj(path)
             elif is_scene_file(path):
                 self._open_scene_asset(path)
@@ -174,6 +225,138 @@ def create_asset_browser_mixin(
                 return None
             data = items[0].data(Qt.UserRole)
             return Path(data) if data else None
+
+        def _asset_item_changed(self, item: Any) -> None:
+            if getattr(self, "_updating_asset_grid", False):
+                return
+            data = item.data(Qt.UserRole)
+            if not data:
+                return
+            path = Path(data)
+            if item.text() == path.name:
+                return
+            try:
+                new_path = self._rename_asset_path(path, item.text())
+                item.setData(Qt.UserRole, str(new_path))
+            except Exception as exc:
+                self._log(f"Rename failed: {exc}")
+                self._updating_asset_grid = True
+                try:
+                    item.setText(path.name)
+                finally:
+                    self._updating_asset_grid = False
+
+        def _asset_folder_is_editable(self, path: Path | None) -> bool:
+            return bool(self.project and path and path.exists() and path.is_dir() and asset_path_is_editable(self.project, path))
+
+        def _asset_path_can_be_modified(self, path: Path) -> bool:
+            if not self.project or not asset_path_is_editable(self.project, path):
+                return False
+            return path.resolve() != self.project.assets_dir.resolve()
+
+        def _create_asset_folder(self, folder: Path | None = None) -> None:
+            if not self.project:
+                return
+            try:
+                path = create_asset_folder(self.project, folder or self.current_asset_folder or self.project.assets_dir)
+                self.current_asset_folder = path.parent
+                self._refresh_assets_from_watcher()
+                self._select_asset_path(path)
+                self._begin_asset_rename(path)
+                self._log(f"Created folder: {path}")
+            except Exception as exc:
+                QMessageBox.critical(self, "Create folder failed", str(exc))
+
+        def _create_blank_asset_file(self, folder: Path | None = None) -> None:
+            if not self.project:
+                return
+            try:
+                path = create_blank_asset_file(self.project, folder or self.current_asset_folder or self.project.assets_dir)
+                self.current_asset_folder = path.parent
+                self._refresh_assets_from_watcher()
+                self._select_asset_path(path)
+                self._begin_asset_rename(path)
+                self._log(f"Created file: {path}")
+            except Exception as exc:
+                QMessageBox.critical(self, "Create file failed", str(exc))
+
+        def _begin_asset_rename(self, path: Path) -> None:
+            item = self._select_asset_path(path)
+            if item is not None:
+                self.assets.editItem(item)
+
+        def _select_asset_path(self, path: Path) -> Any | None:
+            self._select_asset_folder_item(path.parent)
+            if self.current_asset_folder != path.parent:
+                self.current_asset_folder = path.parent
+                self._populate_asset_grid()
+            for index in range(self.assets.count()):
+                item = self.assets.item(index)
+                if item.data(Qt.UserRole) == str(path):
+                    self.assets.setCurrentItem(item)
+                    return item
+            return None
+
+        def _rename_asset_path(self, path: Path, new_name: str) -> Path:
+            if not self.project:
+                raise AssetOperationError("No project open.")
+            old_current_scene = self.current_scene_path
+            new_path = rename_asset_path(self.project, path, new_name)
+            if old_current_scene and old_current_scene.resolve() == path.resolve():
+                self.current_scene_path = new_path
+                self._update_window_title()
+            if update_startup_scene_after_asset_rename(self.project, path, new_path):
+                self._log(f"Startup scene updated: {self.project.startup_scene}")
+            self.selected_asset = new_path
+            self.current_asset_folder = new_path.parent
+            self._refresh_assets_from_watcher()
+            self._select_asset_path(new_path)
+            self._populate_inspector()
+            self._log(f"Renamed asset: {path.name} -> {new_path.name}")
+            return new_path
+
+        def _delete_asset_path(self, path: Path) -> None:
+            if not self.project:
+                return
+            if self.current_scene_path and self._asset_path_contains(path, self.current_scene_path):
+                QMessageBox.warning(self, "Delete blocked", "Open another scene before deleting the current scene.")
+                return
+            startup_scene = self.project.resolve_scene_path(self.project.startup_scene)
+            if is_project_startup_scene(self.project, path) or self._asset_path_contains(path, startup_scene):
+                QMessageBox.warning(self, "Delete blocked", "Choose another startup scene before deleting this scene.")
+                return
+            result = QMessageBox.question(
+                self,
+                "Delete Asset",
+                f"Delete {path.name}?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if result != QMessageBox.Yes:
+                return
+            try:
+                delete_asset_path(self.project, path)
+                if self.selected_asset and self.selected_asset.resolve() == path.resolve():
+                    self.selected_asset = None
+                if self.current_asset_folder and not self.current_asset_folder.exists():
+                    self.current_asset_folder = self.project.assets_dir
+                self._refresh_assets_from_watcher()
+                self._populate_inspector()
+                self._log(f"Deleted asset: {path}")
+            except Exception as exc:
+                QMessageBox.critical(self, "Delete failed", str(exc))
+
+        def _asset_path_contains(self, path: Path, child: Path) -> bool:
+            resolved = path.resolve()
+            candidate = child.resolve()
+            if resolved == candidate:
+                return True
+            if not path.is_dir():
+                return False
+            try:
+                candidate.relative_to(resolved)
+                return True
+            except ValueError:
+                return False
 
         def _import_asset_obj(self, path: Path) -> None:
             if not self.project or not self.scene:

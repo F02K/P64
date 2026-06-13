@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -8,7 +9,16 @@ from p64.engine.assets import AssetMetadata
 from p64.engine.collision import apply_mesh_primitive_defaults
 from p64.engine.components import Camera, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, SpawnPoint
 from p64.engine.entity import ENTITY, GAME_OBJECT, Entity
-from p64.engine.files import find_metadata_for_source, is_metadata_file
+from p64.engine.files import find_metadata_for_source, is_metadata_file, iter_metadata_files, metadata_path_for_source
+from p64.engine.material import (
+    create_material_from_defaults,
+    material_asset_id,
+    material_reference,
+    reset_material_from_metadata,
+    sanitize_material_name,
+    save_material_metadata,
+    resolve_material_reference,
+)
 from p64.engine.obj import import_obj_to_project, parse_obj
 from p64.engine.project import Project
 from p64.engine.scene import Scene
@@ -23,6 +33,10 @@ class DirtyTracker:
 
     def mark_saved(self) -> None:
         self.dirty = False
+
+
+class AssetOperationError(ValueError):
+    pass
 
 
 def duplicate_entity(entity: Entity) -> Entity:
@@ -71,7 +85,15 @@ def insert_obj_scene_entity(project: Project, scene: Scene, obj_or_metadata: Pat
     for group in mesh.groups:
         child = Entity(group.name, object_type=GAME_OBJECT)
         material = group.faces[0].material if group.faces else None
-        child.add_component(MeshRenderer(mesh=metadata.id, submesh=group.name, material=material))
+        child.add_component(
+            MeshRenderer(
+                mesh=metadata.id,
+                submesh=group.name,
+                material=material,
+                source_materials=_source_materials_for(metadata),
+                material_slots=_material_slots_for(metadata),
+            )
+        )
         root.add_child(child)
     scene.add_entity(root)
     return root
@@ -84,10 +106,79 @@ def split_mesh_renderer_into_children(entity: Entity, metadata: AssetMetadata) -
         if group in existing:
             continue
         child = Entity(group, object_type=GAME_OBJECT)
-        child.add_component(MeshRenderer(mesh=metadata.id, submesh=group, material=metadata.materials[0] if metadata.materials else None))
+        material = metadata.materials[0] if metadata.materials else None
+        child.add_component(
+            MeshRenderer(
+                mesh=metadata.id,
+                submesh=group,
+                material=material,
+                source_materials=_source_materials_for(metadata),
+                material_slots=_material_slots_for(metadata),
+            )
+        )
         entity.add_child(child)
         created.append(child)
     return created
+
+
+def extract_materials_for_obj(project: Project, obj_or_metadata: Path, output_dir: Path | None = None) -> list[Path]:
+    metadata_path = obj_or_metadata if is_metadata_file(obj_or_metadata) else find_metadata_for_source(obj_or_metadata)
+    if metadata_path is None or not metadata_path.exists():
+        metadata = import_obj_to_project(project, obj_or_metadata, add_to_startup_scene=False)
+        metadata_path = metadata_path_for_source(project.root / metadata.source)
+    else:
+        metadata = AssetMetadata.load(metadata_path)
+    obj_path = project.root / metadata.source
+    material_defs = metadata.settings.get("material_defs", {})
+    material_assets = dict(metadata.settings.get("material_assets", {}))
+    output_dir = output_dir or project.assets_dir / "materials" / obj_path.stem
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    created_or_existing: list[Path] = []
+    for material_name in metadata.materials:
+        filename = sanitize_material_name(material_name) + ".material"
+        material_path = output_dir / filename
+        if not material_path.exists():
+            create_material_from_defaults(project.root, material_path, material_defs.get(material_name, {}))
+        save_material_metadata(
+            project.root,
+            material_path,
+            defaults=material_defs.get(material_name, {}),
+            source={"mesh": metadata.id, "obj": metadata.source, "mtl": material_name},
+        )
+        material_assets[material_name] = material_asset_id(project.root, material_path)
+        created_or_existing.append(material_path)
+    metadata.settings["material_assets"] = material_assets
+    metadata.settings["material_extract_folder"] = material_reference(project.root, output_dir)
+    metadata.save(metadata_path)
+    return created_or_existing
+
+
+def reset_material_asset(project: Project, material_path: Path) -> None:
+    reset_material_from_metadata(project.root, material_path)
+
+
+def update_material_usage_cache(project: Project, scene: Scene, scene_path: Path | None = None) -> None:
+    usage: dict[str, list[dict[str, str]]] = {}
+    scene_id = scene_path.resolve().relative_to(project.root.resolve()).as_posix() if scene_path else scene.name
+    for entity in scene.walk():
+        for component in entity.components:
+            if not isinstance(component, MeshRenderer):
+                continue
+            for slot in component.material_slots:
+                if not slot:
+                    continue
+                usage.setdefault(str(slot), []).append({
+                    "scene": scene_id,
+                    "entity_id": entity.id,
+                    "entity": entity.name,
+                    "mesh": component.mesh,
+                    "submesh": component.submesh or "",
+                })
+    for material_id, items in usage.items():
+        material_path = resolve_material_reference(project.root, material_id)
+        if material_path and material_path.exists():
+            save_material_metadata(project.root, material_path, usage_cache=items)
 
 
 def move_component(entity: Entity, component: object, direction: int) -> bool:
@@ -109,6 +200,72 @@ def move_script_entry(component: ScriptComponent, index: int, direction: int) ->
     return True
 
 
+def asset_path_is_editable(project: Project, path: Path) -> bool:
+    return _is_relative_to(path.resolve(), project.assets_dir.resolve())
+
+
+def create_asset_folder(project: Project, parent: Path, name: str = "New Folder") -> Path:
+    folder = _editable_asset_folder(project, parent)
+    path = _unique_path(folder / _validate_asset_name(name))
+    path.mkdir()
+    return path
+
+
+def create_blank_asset_file(project: Project, parent: Path, name: str = "new_file.txt") -> Path:
+    folder = _editable_asset_folder(project, parent)
+    path = _unique_path(folder / _validate_asset_name(name))
+    path.write_text("", encoding="utf-8")
+    return path
+
+
+def rename_asset_path(project: Project, path: Path, new_name: str) -> Path:
+    source = _editable_asset_path(project, path)
+    name = _validate_asset_name(new_name)
+    destination = source.with_name(name)
+    if destination == source:
+        return source
+    _ensure_under_assets(project, destination)
+    if destination.exists():
+        raise AssetOperationError(f"Asset already exists: {destination.name}")
+    old_relative = _relative_to_project(project, source)
+    new_relative = _relative_to_project(project, destination)
+    was_dir = source.is_dir()
+    source.rename(destination)
+    if was_dir:
+        _update_metadata_sources_after_folder_rename(project, destination, old_relative, new_relative)
+    elif not is_metadata_file(destination):
+        _move_source_metadata(project, source, destination)
+    return destination
+
+
+def delete_asset_path(project: Project, path: Path) -> None:
+    source = _editable_asset_path(project, path)
+    if source.is_dir():
+        shutil.rmtree(source)
+        return
+    source.unlink()
+    if not is_metadata_file(source):
+        metadata = find_metadata_for_source(source)
+        if metadata and asset_path_is_editable(project, metadata):
+            metadata.unlink()
+
+
+def project_relative_asset_path(project: Project, path: Path) -> str:
+    return _relative_to_project(project, path)
+
+
+def is_project_startup_scene(project: Project, path: Path) -> bool:
+    return project_relative_asset_path(project, path) == project.startup_scene
+
+
+def update_startup_scene_after_asset_rename(project: Project, old_path: Path, new_path: Path) -> bool:
+    if not is_project_startup_scene(project, old_path):
+        return False
+    project.startup_scene = project_relative_asset_path(project, new_path)
+    project.save()
+    return True
+
+
 def create_shader_template(assets_dir: Path, name: str = "new_shader") -> Path:
     shader_dir = assets_dir / "shaders"
     shader_dir.mkdir(parents=True, exist_ok=True)
@@ -116,6 +273,11 @@ def create_shader_template(assets_dir: Path, name: str = "new_shader") -> Path:
     path.write_text(
         'Shader "P64/NewShader"\n'
         "{\n"
+        "    Properties\n"
+        "    {\n"
+        "        Texture u_texture = \"\"\n"
+        "        Color u_base_color = (1.0, 1.0, 1.0)\n"
+        "    }\n\n"
         "    Vertex\n"
         "    {\n"
         "        #version 330\n"
@@ -213,6 +375,77 @@ def _find_parent_in_children(parent: Entity, entity_id: str) -> Entity | None:
     return None
 
 
+def _editable_asset_folder(project: Project, path: Path) -> Path:
+    folder = path.resolve()
+    if not folder.is_dir():
+        raise AssetOperationError(f"Not a folder: {path}")
+    _ensure_under_assets(project, folder)
+    return folder
+
+
+def _editable_asset_path(project: Project, path: Path) -> Path:
+    source = path.resolve()
+    if not source.exists():
+        raise AssetOperationError(f"Asset does not exist: {path}")
+    _ensure_under_assets(project, source)
+    return source
+
+
+def _ensure_under_assets(project: Project, path: Path) -> None:
+    if not _is_relative_to(path.resolve(), project.assets_dir.resolve()):
+        raise AssetOperationError("Asset edits are only allowed under the project's assets folder.")
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_asset_name(name: str) -> str:
+    cleaned = name.strip()
+    if not cleaned:
+        raise AssetOperationError("Asset name cannot be empty.")
+    if cleaned in {".", ".."} or "/" in cleaned or "\\" in cleaned or Path(cleaned).name != cleaned:
+        raise AssetOperationError("Asset name cannot contain path separators.")
+    return cleaned
+
+
+def _relative_to_project(project: Project, path: Path) -> str:
+    return path.resolve().relative_to(project.root.resolve()).as_posix()
+
+
+def _move_source_metadata(project: Project, old_source: Path, new_source: Path) -> None:
+    old_metadata = find_metadata_for_source(old_source)
+    if not old_metadata or not old_metadata.exists():
+        return
+    new_metadata = metadata_path_for_source(new_source)
+    if new_metadata.exists():
+        raise AssetOperationError(f"Asset metadata already exists: {new_metadata.name}")
+    metadata = AssetMetadata.load(old_metadata)
+    metadata.source = _relative_to_project(project, new_source)
+    old_metadata.rename(new_metadata)
+    metadata.save(new_metadata)
+
+
+def _update_metadata_sources_after_folder_rename(project: Project, renamed_folder: Path, old_relative: str, new_relative: str) -> None:
+    old_prefix = old_relative.rstrip("/") + "/"
+    new_prefix = new_relative.rstrip("/") + "/"
+    for metadata_path in iter_metadata_files(renamed_folder):
+        metadata = AssetMetadata.load(metadata_path)
+        if metadata.source == old_relative:
+            metadata.source = new_relative
+        elif metadata.source.startswith(old_prefix):
+            metadata.source = new_prefix + metadata.source[len(old_prefix):]
+        else:
+            source_path = project.root / metadata.source
+            if _is_relative_to(source_path.resolve(), renamed_folder.resolve()):
+                metadata.source = _relative_to_project(project, source_path)
+        metadata.save(metadata_path)
+
+
 def _unique_path(path: Path) -> Path:
     if not path.exists():
         return path
@@ -223,3 +456,19 @@ def _unique_path(path: Path) -> Path:
         if not candidate.exists():
             return candidate
     raise RuntimeError(f"Could not create a unique path for {path}")
+
+
+def _source_materials_for(metadata: AssetMetadata) -> list[str]:
+    return list(metadata.materials)
+
+
+def _material_slots_for(metadata: AssetMetadata) -> list[str | None]:
+    source_materials = _source_materials_for(metadata)
+    material_assets = metadata.settings.get("material_assets", {})
+    slots: list[str | None] = []
+    for material in source_materials:
+        if isinstance(material_assets, dict) and material_assets.get(material):
+            slots.append(str(material_assets[material]))
+        else:
+            slots.append(None)
+    return slots

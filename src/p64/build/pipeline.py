@@ -12,6 +12,7 @@ from pathlib import Path
 from p64.engine.components import MeshRenderer, ScriptComponent
 from p64.engine.assets import AssetMetadata, discover_metadata
 from p64.engine.files import PROJECT_FILE, alternate_scene_path, is_scene_file
+from p64.engine.material import MaterialAsset, load_material_metadata, resolve_material_reference
 from p64.engine.project import Project
 from p64.engine.validation import asset_metadata_by_id, scene_reference_errors
 
@@ -66,6 +67,16 @@ def validate_project(project_root: Path) -> BuildReport:
                             texture = _diffuse_texture_path(project, metadata, component.material)
                             if texture and not texture.exists():
                                 report.errors.append(f"{entity.name} references missing texture: {texture}")
+                        for material in component.material_slots:
+                            material_path = resolve_material_reference(project.root, material)
+                            if material_path and material_path.is_absolute():
+                                try:
+                                    material_path.resolve().relative_to(project.assets_dir.resolve())
+                                except ValueError:
+                                    report.warnings.append(f"{entity.name} references external material: {material_path}")
+                            texture = _material_texture_path(project, material)
+                            if texture and not texture.exists():
+                                report.errors.append(f"{entity.name} references missing material texture: {texture}")
     output_folder = Path(str(project.build_settings.get("output_folder", "build/game")))
     if output_folder.is_absolute():
         report.errors.append("Build output folder must be relative to the project.")
@@ -129,6 +140,35 @@ def _diffuse_texture_path(project: Project, metadata: AssetMetadata, material: s
     if not texture_name:
         return None
     return (project.root / metadata.source).parent / str(texture_name)
+
+
+def _material_texture_path(project: Project, material: str | None) -> Path | None:
+    if not material:
+        return None
+    material_path = resolve_material_reference(project.root, material)
+    if material_path is None:
+        return None
+    if not material_path.exists():
+        return None
+    try:
+        asset = MaterialAsset.load(material_path)
+    except Exception:
+        return None
+    texture_name = asset.textures.get("u_texture")
+    if not texture_name:
+        return None
+    texture_path = Path(str(texture_name))
+    if texture_path.is_absolute():
+        return texture_path
+    candidates: list[Path] = []
+    if str(texture_name).startswith(("assets/", "packages/")):
+        candidates.append(project.root / texture_name)
+    candidates.append(material_path.parent / texture_name)
+    metadata = load_material_metadata(material_path)
+    source = metadata.settings.get("source", {}) if metadata else {}
+    if isinstance(source, dict) and source.get("obj"):
+        candidates.append((project.root / str(source["obj"])).parent / texture_name)
+    return next((candidate for candidate in candidates if candidate.exists()), candidates[0] if candidates else None)
 
 
 def create_runtime_bundle(project_root: Path, output_dir: Path | None = None) -> Path:

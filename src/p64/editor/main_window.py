@@ -10,7 +10,7 @@ from p64.engine.scene import Scene
 from p64.editor.dialogs.build_settings import open_build_settings_dialog
 from p64.editor.dialogs.project_settings import open_project_settings_dialog
 from p64.editor.inspectors.components import create_inspector_mixin
-from p64.editor.ops import DirtyTracker
+from p64.editor.ops import DirtyTracker, update_material_usage_cache
 from p64.editor.panels.assets import create_asset_browser_mixin
 from p64.editor.panels.hierarchy import create_hierarchy_mixin
 from p64.editor.viewport import create_viewport_class
@@ -73,7 +73,7 @@ def launch_editor(project_path: Path | None = None) -> None:
     HierarchyMixin = create_hierarchy_mixin(QTreeWidgetItem, QBrush, QColor, Qt, QMenu, QInputDialog)
     InspectorMixin = create_inspector_mixin(
         QCheckBox, QComboBox, QCompleter, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-        QMenu, QMessageBox, QPixmap, QPushButton, QSizePolicy, Qt, QVBoxLayout, QWidget
+        QMenu, QMessageBox, QFileDialog, QPixmap, QPushButton, QSizePolicy, Qt, QVBoxLayout, QWidget
     )
 
     class MainWindow(AssetBrowserMixin, HierarchyMixin, InspectorMixin, QMainWindow):
@@ -92,6 +92,7 @@ def launch_editor(project_path: Path | None = None) -> None:
             self.collapsed_components: dict[str, bool] = {}
             self.play_session: RuntimeSession | None = None
             self.asset_watcher = QFileSystemWatcher(self)
+            self._updating_asset_grid = False
 
             self.hierarchy = QTreeWidget()
             self.hierarchy.setHeaderLabel("Hierarchy")
@@ -111,6 +112,8 @@ def launch_editor(project_path: Path | None = None) -> None:
             self.asset_folders = QTreeWidget()
             self.asset_folders.setHeaderLabel("Project")
             self.asset_folders.itemSelectionChanged.connect(self._asset_folder_selection_changed)
+            self.asset_folders.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.asset_folders.customContextMenuRequested.connect(self._show_asset_folder_menu)
             self.assets = QListWidget()
             self.assets.setViewMode(QListWidget.IconMode)
             self.assets.setIconSize(QSize(36, 36))
@@ -121,6 +124,7 @@ def launch_editor(project_path: Path | None = None) -> None:
             self.assets.customContextMenuRequested.connect(self._show_asset_menu)
             self.assets.itemDoubleClicked.connect(self._asset_double_clicked)
             self.assets.itemSelectionChanged.connect(self._asset_selection_changed)
+            self.assets.itemChanged.connect(self._asset_item_changed)
             asset_browser = QSplitter(Qt.Horizontal)
             asset_browser.addWidget(self.asset_folders)
             asset_browser.addWidget(self.assets)
@@ -237,6 +241,7 @@ def launch_editor(project_path: Path | None = None) -> None:
         def _save_scene(self) -> None:
             if self.project and self.scene:
                 path = self.current_scene_path or self.project.resolve_scene_path(self.project.startup_scene)
+                update_material_usage_cache(self.project, self.scene, path)
                 self.scene.save(path)
                 self.dirty.mark_saved()
                 self._update_window_title()

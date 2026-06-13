@@ -6,6 +6,7 @@ from pathlib import Path
 from p64.engine.assets import AssetMetadata, discover_metadata
 from p64.engine.components import CharacterController, Collider, EntityPhysics, MeshRenderer, ScriptComponent
 from p64.engine.entity import Entity
+from p64.engine.material import resolve_material_reference
 from p64.engine.project import Project
 from p64.engine.scene import Scene
 
@@ -50,6 +51,10 @@ def entity_reference_errors(project: Project, entity: Entity, metadata: dict[str
                         errors.append(f"Missing material: {component.material}")
             if component.shader and not (project.root / component.shader).exists():
                 errors.append(f"Missing shader: {component.shader}")
+            for material in component.material_slots:
+                material_path = resolve_material_reference(project.root, material)
+                if material_path and not material_path.exists():
+                    errors.append(f"Missing material asset: {material}")
         if isinstance(component, ScriptComponent):
             for entry in component.scripts:
                 if not entry.enabled:

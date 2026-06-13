@@ -62,6 +62,20 @@ class EditorImportTests(unittest.TestCase):
         self.assertNotIn("radius = QLineEdit", before_box_branch)
         self.assertNotIn("fit_to_mesh = QCheckBox", before_box_branch)
 
+    def test_light_kind_specific_fields_are_created_inside_kind_branches(self):
+        source = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
+        light_editor = source[source.index("def _add_light_editor"):source.index("def _add_spawn_point_editor")]
+        before_point_branch = light_editor.split('if component.kind in {"point", "spot"}:', 1)[0]
+        point_branch = light_editor.split('if component.kind in {"point", "spot"}:', 1)[1].split('if component.kind == "spot":', 1)[0]
+        spot_branch = light_editor.split('if component.kind == "spot":', 1)[1]
+
+        self.assertNotIn("range_edit = QLineEdit", before_point_branch)
+        self.assertNotIn("falloff = QLineEdit", before_point_branch)
+        self.assertNotIn("spot_angle = QLineEdit", before_point_branch)
+        self.assertIn("range_edit = QLineEdit", point_branch)
+        self.assertIn("falloff = QLineEdit", point_branch)
+        self.assertIn("spot_angle = QLineEdit", spot_branch)
+
     def test_mesh_collider_shows_convex_without_primitive_fields(self):
         source = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
         collider_editor = source[source.index("def _add_collider_editor"):source.index("def _add_character_controller_editor")]
@@ -97,3 +111,36 @@ class EditorImportTests(unittest.TestCase):
         self.assertNotIn('QPushButton("Down"', script_row)
         self.assertNotIn('QPushButton("Reload"', script_row)
         self.assertNotIn('QPushButton("Remove"', script_row)
+
+    def test_asset_browser_exposes_file_operations_for_editable_assets(self):
+        source = Path("src/p64/editor/panels/assets.py").read_text(encoding="utf-8")
+
+        self.assertIn('"New Folder"', source)
+        self.assertIn('"New File"', source)
+        self.assertIn('"Rename"', source)
+        self.assertIn('"Delete"', source)
+        self.assertIn("_begin_asset_rename", source)
+        self.assertIn("self.assets.editItem", source)
+        self.assertIn("create_asset_folder", source)
+        self.assertIn("create_blank_asset_file", source)
+        self.assertIn("delete_asset_path", source)
+
+    def test_asset_browser_keeps_packages_read_only(self):
+        source = Path("src/p64/editor/panels/assets.py").read_text(encoding="utf-8")
+        main_window = Path("src/p64/editor/main_window.py").read_text(encoding="utf-8")
+
+        self.assertIn("asset_path_is_editable", source)
+        self.assertIn("_asset_folder_is_editable", source)
+        self.assertIn("_asset_path_can_be_modified", source)
+        self.assertIn("item.setFlags(item.flags() | Qt.ItemIsEditable)", source)
+        self.assertIn("self.assets.itemChanged.connect(self._asset_item_changed)", main_window)
+        self.assertIn("self.asset_folders.customContextMenuRequested.connect(self._show_asset_folder_menu)", main_window)
+
+    def test_asset_browser_blocks_current_and_startup_scene_deletion(self):
+        source = Path("src/p64/editor/panels/assets.py").read_text(encoding="utf-8")
+        delete_method = source[source.index("def _delete_asset_path"):source.index("def _open_scene_asset")]
+
+        self.assertIn("Open another scene before deleting the current scene", delete_method)
+        self.assertIn("Choose another startup scene before deleting this scene", delete_method)
+        self.assertIn("is_project_startup_scene", delete_method)
+        self.assertIn("_asset_path_contains", delete_method)

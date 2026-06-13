@@ -8,7 +8,7 @@ from p64.engine.components import EntityPhysics, Fog, Light, MeshRenderer, Scrip
 from p64.engine.entity import GAME_OBJECT, Entity, set_object_type_recursive
 from p64.engine.migration import migrate_project_files
 from p64.engine.math import Vec3
-from p64.engine.project import Project
+from p64.engine.project import Project, _builder_script_source, _source_p64_package_dir
 from p64.engine.scene import Scene
 from p64.engine.scene_manager import SceneManager
 
@@ -68,6 +68,57 @@ class ProjectSceneTests(unittest.TestCase):
             Project.load(project.root).save()
 
             self.assertTrue((project.root / "libraries" / "P64Build" / "builder.py").exists())
+
+    def test_project_load_refreshes_generated_build_pipeline_and_runtime_source(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            builder = project.build_pipeline_dir / "builder.py"
+            runtime_copy = project.build_pipeline_dir / "p64_source" / "p64" / "engine" / "runtime.py"
+            builder.write_text("# stale builder\n", encoding="utf-8")
+            runtime_copy.write_text("# stale runtime\n", encoding="utf-8")
+
+            Project.load(project.root)
+
+            self.assertEqual(builder.read_text(encoding="utf-8"), _builder_script_source())
+            source_runtime = _source_p64_package_dir() / "engine" / "runtime.py"
+            self.assertEqual(runtime_copy.read_text(encoding="utf-8"), source_runtime.read_text(encoding="utf-8"))
+
+    def test_project_load_recreates_missing_build_pipeline(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            shutil.rmtree(project.root / "libraries")
+
+            loaded = Project.load(project.root)
+
+            self.assertTrue((loaded.build_pipeline_dir / "builder.py").exists())
+            self.assertTrue((loaded.build_pipeline_dir / "p64_source" / "p64" / "engine" / "runtime.py").exists())
+
+    def test_project_load_refreshes_custom_build_pipeline_path(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            project.build_settings["build_pipeline_path"] = "libraries/CustomBuild"
+            project.save()
+            custom_builder = project.root / "libraries" / "CustomBuild" / "builder.py"
+            custom_builder.write_text("# stale custom builder\n", encoding="utf-8")
+
+            loaded = Project.load(project.root)
+
+            self.assertEqual(loaded.build_settings["build_pipeline_path"], "libraries/CustomBuild")
+            self.assertEqual(custom_builder.read_text(encoding="utf-8"), _builder_script_source())
+
+    def test_project_load_refreshes_generated_builtin_shader_without_touching_user_shader(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            builtin_shader = project.root / STANDARD_SHADER_RELATIVE
+            user_shader = project.assets_dir / "shaders" / "custom.shader"
+            user_shader.parent.mkdir(parents=True, exist_ok=True)
+            builtin_shader.write_text('Shader "P64Builtin/Standard VertexLit"\n{ stale }\n', encoding="utf-8")
+            user_shader.write_text('Shader "Custom"\n{ keep me }\n', encoding="utf-8")
+
+            Project.load(project.root)
+
+            self.assertIn("u_base_color", builtin_shader.read_text(encoding="utf-8"))
+            self.assertEqual(user_shader.read_text(encoding="utf-8"), 'Shader "Custom"\n{ keep me }\n')
 
     def test_legacy_project_files_load_and_migrate(self):
         with TemporaryDirectory() as tmp:
@@ -171,7 +222,15 @@ class ProjectSceneTests(unittest.TestCase):
 
     def test_scene_serializes_components(self):
         root = Entity("Root")
-        root.add_component(MeshRenderer(mesh="mesh", submesh="Door", shader="assets/shaders/standard.shader"))
+        root.add_component(
+            MeshRenderer(
+                mesh="mesh",
+                submesh="Door",
+                shader="assets/shaders/standard.shader",
+                source_materials=["Frame", "Glass"],
+                material_slots=["assets/materials/Door.material"],
+            )
+        )
         root.add_component(ScriptComponent(scripts=[ScriptEntry(script="spin.py", class_name="Spin")]))
         root.add_component(
             EntityPhysics(
@@ -191,6 +250,8 @@ class ProjectSceneTests(unittest.TestCase):
         loaded = Scene.from_dict(scene.to_dict())
         self.assertEqual(loaded.entities[0].components[0].mesh, "mesh")
         self.assertEqual(loaded.entities[0].components[0].shader, "assets/shaders/standard.shader")
+        self.assertEqual(loaded.entities[0].components[0].source_materials, ["Frame", "Glass"])
+        self.assertEqual(loaded.entities[0].components[0].material_slots, ["assets/materials/Door.material"])
         self.assertEqual(loaded.entities[0].components[1].scripts[0].script, "spin.py")
         physics = loaded.entities[0].components[2]
         self.assertIsInstance(physics, EntityPhysics)

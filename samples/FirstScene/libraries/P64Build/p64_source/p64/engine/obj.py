@@ -17,6 +17,7 @@ class ObjVertex:
     position: tuple[float, float, float]
     texcoord: tuple[float, float] | None = None
     normal: tuple[float, float, float] | None = None
+    color: tuple[float, float, float] | None = None
 
 
 @dataclass
@@ -89,6 +90,7 @@ def parse_mtl(path: Path) -> dict[str, MtlMaterial]:
 
 def parse_obj(path: Path) -> ObjMesh:
     positions: list[tuple[float, float, float]] = []
+    vertex_colors: list[tuple[float, float, float] | None] = []
     texcoords: list[tuple[float, float]] = []
     normals: list[tuple[float, float, float]] = []
     groups: list[ObjGroup] = []
@@ -113,6 +115,10 @@ def parse_obj(path: Path) -> ObjMesh:
             mtllibs.append(" ".join(values))
         elif tag == "v" and len(values) >= 3:
             positions.append((float(values[0]), float(values[1]), float(values[2])))
+            if len(values) >= 6:
+                vertex_colors.append(_parse_vertex_color(values[3:6]))
+            else:
+                vertex_colors.append(None)
         elif tag == "vt" and len(values) >= 2:
             texcoords.append((float(values[0]), float(values[1])))
         elif tag == "vn" and len(values) >= 3:
@@ -126,7 +132,7 @@ def parse_obj(path: Path) -> ObjMesh:
             if current_material not in material_names:
                 material_names.append(current_material)
         elif tag == "f" and len(values) >= 3:
-            face_vertices = [_resolve_vertex(token, positions, texcoords, normals) for token in values]
+            face_vertices = [_resolve_vertex(token, positions, vertex_colors, texcoords, normals) for token in values]
             for idx in range(1, len(face_vertices) - 1):
                 ensure_current().faces.append(
                     ObjFace(
@@ -180,7 +186,7 @@ def import_obj_to_project(project: Project, obj_path: Path, add_to_startup_scene
         for group in mesh.groups:
             child = Entity(group.name, object_type=GAME_OBJECT)
             material = group.faces[0].material if group.faces else None
-            child.add_component(MeshRenderer(mesh=metadata.id, submesh=group.name, material=material))
+            child.add_component(MeshRenderer(mesh=metadata.id, submesh=group.name, material=material, source_materials=list(metadata.materials)))
             root.add_child(child)
         scene.add_entity(root)
         project.save_startup_scene(scene)
@@ -195,24 +201,39 @@ def mesh_vertices_for_group(group: ObjGroup) -> list[float]:
             vertices.extend(vertex.position)
             vertices.extend(vertex.texcoord or (0.0, 0.0))
             vertices.extend(vertex.normal or (0.0, 1.0, 0.0))
+            vertices.extend(vertex.color or (1.0, 1.0, 1.0))
     return vertices
 
 
 def _resolve_vertex(
     token: str,
     positions: list[tuple[float, float, float]],
+    vertex_colors: list[tuple[float, float, float] | None],
     texcoords: list[tuple[float, float]],
     normals: list[tuple[float, float, float]],
 ) -> ObjVertex:
     refs = token.split("/")
-    position = positions[_obj_index(refs[0], len(positions))]
+    position_index = _obj_index(refs[0], len(positions))
+    position = positions[position_index]
+    color = vertex_colors[position_index] if position_index < len(vertex_colors) else None
     texcoord = None
     normal = None
     if len(refs) >= 2 and refs[1]:
         texcoord = texcoords[_obj_index(refs[1], len(texcoords))]
     if len(refs) >= 3 and refs[2]:
         normal = normals[_obj_index(refs[2], len(normals))]
-    return ObjVertex(position=position, texcoord=texcoord, normal=normal)
+    return ObjVertex(position=position, texcoord=texcoord, normal=normal, color=color)
+
+
+def _parse_vertex_color(values: list[str]) -> tuple[float, float, float]:
+    channels = [float(value) for value in values[:3]]
+    if any(channel > 1.0 for channel in channels):
+        channels = [channel / 255.0 for channel in channels]
+    return (
+        max(0.0, min(1.0, channels[0])),
+        max(0.0, min(1.0, channels[1])),
+        max(0.0, min(1.0, channels[2])),
+    )
 
 
 def _obj_index(value: str, length: int) -> int:
