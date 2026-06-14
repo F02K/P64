@@ -113,6 +113,7 @@ class ShaderAssetTests(unittest.TestCase):
             "build",
             "__pycache__",
             ".pytest_cache",
+            ".venv",
             "libraries",
         }
         offenders: list[str] = []

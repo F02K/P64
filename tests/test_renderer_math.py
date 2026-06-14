@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from p64.engine.math import Vec3
-from p64.engine.components import Collider, Light, MeshRenderer
+from p64.engine.components import AudioSource, Camera, Collider, Light, MeshRenderer
 from p64.engine.entity import Entity
 from p64.engine.files import find_metadata_for_source
 from p64.engine.material import MaterialAsset, save_material_metadata
@@ -26,9 +26,13 @@ from p64.renderer.scene_renderer import (
     _perspective_matrix,
     _project_point,
     _view_matrix,
+    audio_source_range_radii,
     camera_basis,
+    camera_frustum_vertices,
+    cloud_plane_vertices,
     grid_line_batches,
 )
+from p64.renderer.shaders import CLOUD_PLANE_FRAGMENT_SHADER, SKYBOX_FRAGMENT_SHADER
 
 
 class RendererMathTests(unittest.TestCase):
@@ -329,6 +333,39 @@ class RendererMathTests(unittest.TestCase):
 
             self.assertEqual(drawn, ["Child", "Child"])
 
+    def test_audio_source_gizmo_uses_min_and_max_ranges(self):
+        source = AudioSource(min_distance=2.0, max_distance=9.0)
+
+        self.assertEqual(audio_source_range_radii(source), (2.0, 9.0))
+
+    def test_camera_frustum_vertices_include_near_far_planes_and_edges(self):
+        vertices = camera_frustum_vertices(Vec3(), Vec3(), 90.0, 1.0, 3.0, 1.0)
+
+        self.assertEqual(len(vertices), 72)
+        z_values = vertices[2::3]
+        self.assertIn(-1.0, [round(value, 4) for value in z_values])
+        self.assertIn(-3.0, [round(value, 4) for value in z_values])
+
+    def test_selected_audio_and_camera_gizmos_are_drawn(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            audio_entity = Entity("Audio")
+            audio_entity.add_component(AudioSource(min_distance=1.0, max_distance=4.0))
+            camera_entity = Entity("Camera")
+            camera_entity.add_component(Camera(near=0.2, far=5.0))
+            scene = Scene("Test", [audio_entity, camera_entity])
+            renderer = _renderer(project)
+            drawn: list[str] = []
+            renderer._draw_audio_source_ranges = lambda *_args: drawn.append("audio")
+            renderer._draw_camera_frustum = lambda *_args: drawn.append("camera")
+            view = _view_matrix(RenderCamera(Vec3(), Vec3()))
+            projection = _perspective_matrix(60, 1.0, 0.1, 100)
+
+            renderer._draw_component_gizmos(scene, view, projection, selected=audio_entity)
+            renderer._draw_component_gizmos(scene, view, projection, selected=camera_entity)
+
+            self.assertEqual(drawn, ["audio", "camera"])
+
     def test_convex_mesh_collider_wireframe_uses_hull_cache(self):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
@@ -494,6 +531,56 @@ class RendererMathTests(unittest.TestCase):
             self.assertIsNotNone(render_mesh.batches)
             self.assertEqual(len(render_mesh.batches or []), 2)
             self.assertEqual(sum(batch.vao.render_count for batch in render_mesh.batches or []), 2)
+
+    def test_skybox_pass_renders_before_meshes_when_enabled(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            entity = Entity("Target")
+            entity.add_component(MeshRenderer(mesh="missing"))
+            scene = Scene("Test", [entity])
+            scene.render_settings["skybox_enabled"] = True
+            renderer = _renderer(project)
+            events: list[str] = []
+            renderer._draw_skybox = lambda *_args: events.append("skybox")
+            renderer._draw_cloud_plane = lambda *_args: events.append("cloud")
+            renderer._draw_mesh = lambda *_args: events.append("mesh") or False
+
+            renderer.render(scene, 320, 240, camera=RenderCamera(Vec3(), Vec3()), show_grid=False)
+
+            self.assertEqual(events, ["skybox", "cloud", "mesh"])
+
+    def test_skybox_pass_skips_when_disabled(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            scene = Scene("Test")
+            scene.render_settings["skybox_enabled"] = False
+            renderer = _renderer(project)
+            calls: list[str] = []
+            renderer._draw_skybox = lambda *_args: calls.append("skybox")
+            renderer._draw_cloud_plane = lambda *_args: calls.append("cloud")
+
+            renderer.render(scene, 320, 240, camera=RenderCamera(Vec3(), Vec3()), show_grid=False)
+
+            self.assertEqual(calls, [])
+
+    def test_cloud_plane_vertices_follow_camera_xz_above_camera(self):
+        camera = RenderCamera(position=Vec3(10.0, 4.0, -6.0), rotation=Vec3(), far=200.0)
+        vertices = cloud_plane_vertices(camera, 80.0)
+
+        self.assertEqual(len(vertices), 18)
+        self.assertEqual(set(round(value, 4) for value in vertices[1::3]), {84.0})
+        self.assertAlmostEqual((min(vertices[0::3]) + max(vertices[0::3])) / 2.0, 10.0)
+        self.assertAlmostEqual((min(vertices[2::3]) + max(vertices[2::3])) / 2.0, -6.0)
+
+    def test_skybox_gradient_and_cloud_plane_shader_are_split(self):
+        self.assertNotIn("value_noise", SKYBOX_FRAGMENT_SHADER)
+        self.assertIn("value_noise", CLOUD_PLANE_FRAGMENT_SHADER)
+        self.assertIn("fbm", CLOUD_PLANE_FRAGMENT_SHADER)
+        self.assertIn("u_skybox_cloud_height", CLOUD_PLANE_FRAGMENT_SHADER)
+        self.assertIn("u_skybox_cloud_softness", CLOUD_PLANE_FRAGMENT_SHADER)
+        self.assertIn("u_color_levels", CLOUD_PLANE_FRAGMENT_SHADER)
+        self.assertIn("u_dithering_enabled", CLOUD_PLANE_FRAGMENT_SHADER)
+        self.assertIn("fragColor = vec4", CLOUD_PLANE_FRAGMENT_SHADER)
 
     def test_selection_outline_vao_is_cached_with_render_mesh_and_cleared_on_reload(self):
         with TemporaryDirectory() as tmp:

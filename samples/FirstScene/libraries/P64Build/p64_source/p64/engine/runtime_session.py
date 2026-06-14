@@ -6,7 +6,7 @@ from typing import Any
 from p64.engine.project import Project
 from p64.engine.scene import Scene
 from p64.engine.scene_manager import SceneManager
-from p64.engine.audio import AudioSystem
+from p64.engine.audio import AudioSystem, ensure_audio_clips_for_assets
 from p64.engine.collision import CollisionWorld
 from p64.engine.input import InputState
 from p64.engine.scripting import ScriptContext, ScriptManager
@@ -21,15 +21,20 @@ class RuntimeScript:
 class RuntimeSession:
     def __init__(self, project: Project, scene: Scene | None = None) -> None:
         self.project = project
+        self.errors: list[str] = []
+        self._pending_errors: list[str] = []
+        try:
+            ensure_audio_clips_for_assets(project)
+        except Exception as exc:
+            self._record_runtime_error(f"Audio import failed: {exc}")
         self.scene_manager = SceneManager(project, scene)
         self.script_manager = ScriptManager(
             [project.scripts_dir, project.root / "scripts"],
             import_dirs=[project.project_api_dir],
         )
         self.input = InputState()
-        self.audio = AudioSystem(project)
+        self.audio = AudioSystem(project, logger=self._record_runtime_error)
         self.time = 0.0
-        self.errors: list[str] = []
         self._scripts: list[RuntimeScript] = []
         self._started = False
 
@@ -38,11 +43,14 @@ class RuntimeSession:
         return self.scene_manager.current_scene
 
     def start(self) -> list[str]:
+        errors = self._drain_pending_errors()
         if self._started:
-            return []
+            return errors
         self._started = True
         self.audio.start_scene(self.scene)
-        return self._instantiate_scene_scripts()
+        errors.extend(self._drain_pending_errors())
+        errors.extend(self._instantiate_scene_scripts())
+        return errors
 
     def stop(self) -> None:
         self.audio.stop_all()
@@ -70,9 +78,11 @@ class RuntimeSession:
             if self.scene_manager.apply_queued_scene():
                 self.audio.stop_all()
                 self.audio.start_scene(self.scene)
+                errors.extend(self._drain_pending_errors())
                 errors.extend(self._instantiate_scene_scripts())
             CollisionWorld(self.scene, self.project).step_physics(dt)
             self.audio.tick(self.scene, dt)
+            errors.extend(self._drain_pending_errors())
             self.errors.extend(errors)
             return errors
         finally:
@@ -94,4 +104,12 @@ class RuntimeSession:
                     except Exception as exc:  # pragma: no cover - exact user code is unknowable
                         errors.append(f"{entry_name}.on_start failed: {exc}")
                 self._scripts.append(RuntimeScript(entry_name=entry_name, instance=instance))
+        return errors
+
+    def _record_runtime_error(self, message: str) -> None:
+        self._pending_errors.append(message)
+
+    def _drain_pending_errors(self) -> list[str]:
+        errors = list(self._pending_errors)
+        self._pending_errors.clear()
         return errors

@@ -10,7 +10,7 @@ from uuid import uuid4
 from p64.engine.audio import import_audio_clip
 from p64.engine.assets import AssetMetadata, model_meshes
 from p64.engine.collision import apply_mesh_primitive_defaults
-from p64.engine.components import AudioSource, Camera, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, SpawnPoint
+from p64.engine.components import AudioListener, AudioSource, Camera, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, SpawnPoint
 from p64.engine.entity import ENTITY, GAME_OBJECT, Entity
 from p64.engine.files import find_metadata_for_source, is_metadata_file, iter_metadata_files, metadata_path_for_source
 from p64.engine.material import (
@@ -357,6 +357,8 @@ def add_component(entity: Entity, component_name: str, project: Project | None =
         return entity.add_component(Light())
     if component_name == "AudioSource":
         return entity.add_component(AudioSource())
+    if component_name == "AudioListener":
+        return entity.add_component(AudioListener())
     if component_name == "Fog":
         return entity.add_component(Fog())
     if component_name == "ScriptComponent":

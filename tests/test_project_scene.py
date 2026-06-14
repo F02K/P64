@@ -1,15 +1,19 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 import shutil
+import subprocess
 import unittest
 
 from p64.__main__ import main as p64_main
+import p64.engine.project as project_module
 from p64.engine.builtin import LEGACY_STANDARD_SHADER_RELATIVE, STANDARD_SHADER_RELATIVE, STANDARD_UNLIT_SHADER_RELATIVE
-from p64.engine.components import EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, ScriptEntry, SpawnPoint
+from p64.engine.components import AudioListener, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, ScriptEntry, SpawnPoint
 from p64.engine.entity import GAME_OBJECT, Entity, set_object_type_recursive
 from p64.engine.migration import migrate_project_files
 from p64.engine.math import Vec3
-from p64.engine.project import Project, _builder_script_source, _source_p64_package_dir
+from p64.engine.project import Project, _builder_script_source, _source_p64_package_dir, default_render_settings, ensure_project_runtime_env, is_project_runtime_env_ready
+from p64.engine.render_settings import clamp_render_settings
 from p64.engine.scene import Scene
 from p64.engine.scene_manager import SceneManager
 from p64.engine.vscode import setup_vscode_project
@@ -45,6 +49,119 @@ class ProjectSceneTests(unittest.TestCase):
             self.assertTrue((project.root / "assets").exists())
             self.assertIsNotNone(reloaded.active_camera())
             self.assertEqual(reloaded.entities[-1].name, "Thing")
+
+    def test_project_runtime_python_uses_project_venv(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+
+            self.assertEqual(project.runtime_env_dir, project.root / ".venv")
+            expected = project.runtime_env_dir / ("Scripts" if project_module.os.name == "nt" else "bin")
+            self.assertEqual(project.runtime_python.parent, expected)
+
+    def test_project_runtime_gui_python_prefers_pythonw_on_windows(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            pythonw = project.runtime_env_dir / "Scripts" / "pythonw.exe"
+            pythonw.parent.mkdir(parents=True)
+            pythonw.write_text("", encoding="utf-8")
+
+            with mock.patch.object(project_module.os, "name", "nt"):
+                self.assertEqual(project.runtime_gui_python, pythonw)
+
+            pythonw.unlink()
+            with mock.patch.object(project_module.os, "name", "nt"):
+                self.assertEqual(project.runtime_gui_python, project.runtime_python)
+
+    def test_project_runtime_env_ready_requires_python_and_imports(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+
+            self.assertFalse(is_project_runtime_env_ready(project))
+
+            project.runtime_python.parent.mkdir(parents=True)
+            project.runtime_python.write_text("", encoding="utf-8")
+            with mock.patch.object(project_module.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)):
+                self.assertFalse(is_project_runtime_env_ready(project))
+            with mock.patch.object(project_module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+                self.assertTrue(is_project_runtime_env_ready(project))
+
+    def test_ensure_project_runtime_env_creates_venv_and_installs_editable_project(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+
+            with (
+                mock.patch.object(project_module, "is_project_runtime_env_ready", side_effect=[False, True]),
+                mock.patch.object(project_module.venv, "EnvBuilder") as builder,
+                mock.patch.object(project_module.subprocess, "run") as run,
+            ):
+                python = ensure_project_runtime_env(project)
+
+            self.assertEqual(python, project.runtime_python)
+            builder.assert_called_once_with(with_pip=True, clear=False)
+            builder.return_value.create.assert_called_once_with(project.runtime_env_dir)
+            command = run.call_args.args[0]
+            self.assertEqual(command[:5], [str(project.runtime_python), "-m", "pip", "install", "--upgrade"])
+            self.assertIn("-e", command)
+            self.assertTrue(command[-1].endswith("[dev]"))
+
+    def test_ensure_project_runtime_env_streams_install_output_to_logger(self):
+        class FakeProcess:
+            stdout = ["Collecting pygame\n", "Successfully installed\n"]
+
+            def wait(self):
+                return 0
+
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            messages: list[str] = []
+
+            with (
+                mock.patch.object(project_module, "is_project_runtime_env_ready", side_effect=[False, True]),
+                mock.patch.object(project_module.venv, "EnvBuilder"),
+                mock.patch.object(project_module.subprocess, "Popen", return_value=FakeProcess()) as popen,
+            ):
+                ensure_project_runtime_env(project, messages.append)
+
+            self.assertTrue(any("Preparing project Python environment" in message for message in messages))
+            self.assertIn("Collecting pygame", messages)
+            self.assertIn("Successfully installed", messages)
+            self.assertEqual(popen.call_args.kwargs["stdout"], project_module.subprocess.PIPE)
+            self.assertEqual(popen.call_args.kwargs["stderr"], project_module.subprocess.STDOUT)
+
+    def test_ensure_project_runtime_env_clears_incomplete_existing_venv(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            project.runtime_env_dir.mkdir()
+
+            with (
+                mock.patch.object(project_module, "is_project_runtime_env_ready", side_effect=[False, True]),
+                mock.patch.object(project_module.venv, "EnvBuilder") as builder,
+                mock.patch.object(project_module.subprocess, "run"),
+            ):
+                ensure_project_runtime_env(project)
+
+            builder.assert_called_once_with(with_pip=True, clear=True)
+            builder.return_value.create.assert_called_once_with(project.runtime_env_dir)
+
+    def test_ensure_project_runtime_env_uses_external_python_when_current_executable_is_frozen(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            project.runtime_env_dir.mkdir()
+            create_command = ["C:\\Python313\\python.exe", "-m", "venv", "--clear", str(project.runtime_env_dir)]
+
+            with (
+                mock.patch.object(project_module, "is_project_runtime_env_ready", side_effect=[False, True]),
+                mock.patch.object(project_module, "_can_use_current_python_for_venv", return_value=False),
+                mock.patch.object(project_module, "_external_venv_command", return_value=create_command) as external_command,
+                mock.patch.object(project_module.venv, "EnvBuilder") as builder,
+                mock.patch.object(project_module.subprocess, "run") as run,
+            ):
+                ensure_project_runtime_env(project)
+
+            external_command.assert_called_once_with(project.runtime_env_dir, clear=True)
+            builder.assert_not_called()
+            self.assertEqual(run.call_args_list[0].args[0], create_command)
+            self.assertEqual(run.call_args_list[0].kwargs["check"], True)
 
     def test_vscode_setup_merges_existing_files_and_generates_project_api(self):
         with TemporaryDirectory() as tmp:
@@ -109,6 +226,39 @@ class ProjectSceneTests(unittest.TestCase):
             self.assertFalse(loaded.build_settings["auto_install_build_dependencies"])
             self.assertEqual(loaded.editor_settings["scene_grid"]["spacing"], 2.5)
             self.assertEqual(loaded.render_settings["color_levels"], 2)
+
+    def test_render_settings_include_default_skybox_values(self):
+        settings = default_render_settings()
+
+        self.assertTrue(settings["skybox_enabled"])
+        self.assertEqual(len(settings["skybox_top_color"]), 3)
+        self.assertEqual(len(settings["skybox_horizon_color"]), 3)
+        self.assertEqual(len(settings["skybox_cloud_color"]), 3)
+        self.assertGreaterEqual(settings["skybox_cloud_coverage"], 0.0)
+        self.assertLessEqual(settings["skybox_cloud_coverage"], 1.0)
+        self.assertGreater(settings["skybox_cloud_scale"], 0.0)
+        self.assertGreater(settings["skybox_cloud_height"], 0.0)
+        self.assertGreaterEqual(settings["skybox_cloud_softness"], 0.0)
+        self.assertLessEqual(settings["skybox_cloud_softness"], 1.0)
+
+    def test_legacy_scene_load_gets_skybox_defaults(self):
+        scene = Scene.from_dict({"name": "Legacy", "entities": []})
+
+        self.assertTrue(scene.render_settings["skybox_enabled"])
+        self.assertIn("skybox_cloud_coverage", scene.render_settings)
+        self.assertIn("skybox_cloud_height", scene.render_settings)
+        self.assertIn("skybox_cloud_softness", scene.render_settings)
+
+    def test_skybox_cloud_values_are_clamped(self):
+        settings = clamp_render_settings({
+            "skybox_cloud_height": -5.0,
+            "skybox_cloud_softness": 2.0,
+            "skybox_cloud_coverage": -1.0,
+        })
+
+        self.assertEqual(settings["skybox_cloud_height"], 0.1)
+        self.assertEqual(settings["skybox_cloud_softness"], 1.0)
+        self.assertEqual(settings["skybox_cloud_coverage"], 0.0)
 
     def test_existing_project_save_adds_build_pipeline(self):
         with TemporaryDirectory() as tmp:
@@ -309,6 +459,16 @@ class ProjectSceneTests(unittest.TestCase):
         self.assertFalse(physics.use_gravity)
         self.assertEqual(physics.velocity.to_list(), [1.0, 2.0, 3.0])
         self.assertEqual(physics.freeze_rotation.to_list(), [0.0, 1.0, 0.0])
+
+    def test_active_audio_listener_uses_first_enabled_active_listener(self):
+        inactive_entity = Entity("Inactive", active=False, components=[AudioListener()])
+        disabled_listener = Entity("Disabled", components=[AudioListener(enabled=False)])
+        inactive_listener = Entity("Inactive Listener", components=[AudioListener(active=False)])
+        active_listener = Entity("Active Listener", components=[AudioListener()])
+        second_listener = Entity("Second Listener", components=[AudioListener()])
+        scene = Scene("Audio", [inactive_entity, disabled_listener, inactive_listener, active_listener, second_listener])
+
+        self.assertIs(scene.active_audio_listener(), active_listener)
 
     def test_entity_serializes_persistent_flag(self):
         entity = Entity("Player", persistent=True)

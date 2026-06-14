@@ -5,6 +5,7 @@ folders.
 
 ```text
 MyGame/
+  .venv/
   .vscode/
     settings.json
     tasks.json
@@ -48,6 +49,8 @@ MyGame/
 - `.material` files store editable runtime material data.
 - `.mdp64` files store generated asset metadata and editor-only sidecar data.
 - `.shader` files store custom shader source.
+- `.venv/` stores the project Python environment used by the Hub, editor, and
+  runtime commands. It is generated and should not be committed.
 - `.vscode/` stores generated VSCode workspace support files.
 
 ## Editable Content
@@ -70,6 +73,8 @@ desktop builds.
 When a project is opened, P64 refreshes generated builtin shaders and build
 support files if they are recognizable generated files. New projects also receive
 VSCode support files and `packages/P64Generated/python/p64_project_api.py`.
+The Hub also creates or refreshes `.venv/` so editor/runtime dependencies such as
+PySide6, ModernGL, pygame, NumPy, and Pillow are available for that project.
 Imported WAV runtime copies are generated automatically under
 `packages/P64Generated/audio/` when the editor refreshes assets or
 validation/builds run.

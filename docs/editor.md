@@ -82,12 +82,14 @@ fields. Reset restores values from the hidden `.material.mdp64` defaults.
 
 ## Audio
 
-AudioSource components play WAV AudioClips. WAV files under `assets/` are
+AudioSource components play WAV AudioClips when the scene also has an active
+AudioListener component, usually on the camera. WAV files under `assets/` are
 imported automatically when the editor refreshes assets. The importer converts
 clips to mono, 16-bit PCM, with a maximum sample rate of 22050 Hz, then writes
 the runtime copy under `packages/P64Generated/audio/`. Spatial AudioSources stay
 mono as assets and are panned/attenuated at runtime relative to the active
-camera. The manual refresh action forces a reimport of a selected WAV.
+AudioListener position and rotation. The manual refresh action forces a reimport
+of a selected WAV.
 
 ## Scene And Game Tabs
 

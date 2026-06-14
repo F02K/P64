@@ -130,12 +130,15 @@ class AudioSystem:
         self._pygame: Any | None = None
         self._sound_cache: dict[str, Any] = {}
         self._channels: dict[int, Any] = {}
+        self._paused: set[int] = set()
         self._metadata = self._load_metadata()
         self._available: bool | None = None
         self._scene: Scene | None = None
+        self._missing_listener_logged = False
 
     def bind_scene(self, scene: Scene) -> None:
         self._scene = scene
+        self._missing_listener_logged = False
         for entity in scene.walk():
             for component in entity.components:
                 if isinstance(component, AudioSource):
@@ -151,47 +154,72 @@ class AudioSystem:
                     self.play(entity, component)
 
     def tick(self, scene: Scene, _dt: float) -> None:
-        listener = _listener_position(scene)
+        listener = _listener_pose(scene)
+        if listener is None:
+            if self._channels:
+                self._log_missing_listener()
+                self.stop_all()
+            return
+        listener_position, listener_rotation = listener
         for entity in scene.walk():
             for component in entity.components:
                 if not isinstance(component, AudioSource):
                     continue
                 component.bind_runtime(self, entity)
-                channel = self._channels.get(id(component))
+                component_id = id(component)
+                channel = self._channels.get(component_id)
                 if channel is None:
                     continue
                 if not entity.active or not component.enabled:
                     self.stop(component)
                     continue
-                left, right = spatial_gains(component, _world_position(entity), listener)
-                channel.set_volume(left, right)
+                try:
+                    if not component.loop and component_id not in self._paused and hasattr(channel, "get_busy") and not channel.get_busy():
+                        self._channels.pop(component_id, None)
+                        continue
+                    left, right = spatial_gains(component, _world_position(entity), listener_position, listener_rotation)
+                    channel.set_volume(left, right)
+                except Exception as exc:
+                    self._channels.pop(component_id, None)
+                    self._paused.discard(component_id)
+                    self._log(f"Audio channel update failed: {exc}")
 
     def stop_all(self) -> None:
         for channel in list(self._channels.values()):
             channel.stop()
         self._channels.clear()
+        self._paused.clear()
 
     def play(self, entity: Any, source: AudioSource) -> bool:
         if not source.enabled or not source.clip:
             return False
+        listener = _listener_pose(self._scene) if self._scene else None
+        if listener is None:
+            self._log_missing_listener()
+            return False
         if not self._ensure_mixer():
             return False
-        sound = self._sound_for(source.clip)
+        sound = self._sound_for(source.clip, source.pitch)
         if sound is None:
             return False
         self.stop(source)
         loops = -1 if source.loop else 0
-        channel = sound.play(loops=loops)
+        try:
+            channel = sound.play(loops=loops)
+        except Exception as exc:
+            self._log(f"Audio playback failed: {exc}")
+            return False
         if channel is None:
             return False
-        listener = _listener_position(self._scene) if self._scene else Vec3()
-        left, right = spatial_gains(source, _world_position(entity), listener)
+        listener_position, listener_rotation = listener
+        left, right = spatial_gains(source, _world_position(entity), listener_position, listener_rotation)
         channel.set_volume(left, right)
         self._channels[id(source)] = channel
         return True
 
     def stop(self, source: AudioSource) -> None:
         channel = self._channels.pop(id(source), None)
+        self._paused.discard(id(source))
         if channel is not None:
             channel.stop()
 
@@ -199,11 +227,13 @@ class AudioSystem:
         channel = self._channels.get(id(source))
         if channel is not None:
             channel.pause()
+            self._paused.add(id(source))
 
     def resume(self, source: AudioSource) -> None:
         channel = self._channels.get(id(source))
         if channel is not None:
             channel.unpause()
+            self._paused.discard(id(source))
 
     def _load_metadata(self) -> dict[str, AssetMetadata]:
         metadata: dict[str, AssetMetadata] = {}
@@ -216,7 +246,7 @@ class AudioSystem:
                 metadata[item.id] = item
         return metadata
 
-    def _sound_for(self, clip: str) -> Any | None:
+    def _sound_for(self, clip: str, pitch: float = 1.0) -> Any | None:
         metadata = resolve_audio_clip(self._metadata, clip)
         if metadata is None:
             self._log(f"Audio clip not found: {clip}")
@@ -230,10 +260,33 @@ class AudioSystem:
         if not path.exists():
             self._log(f"Generated audio missing: {path}")
             return None
-        cache_key = str(path.resolve())
-        if cache_key not in self._sound_cache:
-            self._sound_cache[cache_key] = self._pygame.mixer.Sound(str(path))
+        pitch = max(0.001, float(pitch))
+        cache_key = f"{path.resolve()}|pitch={pitch:.6f}"
+        try:
+            if cache_key not in self._sound_cache:
+                if _is_default_pitch(pitch):
+                    self._sound_cache[cache_key] = self._pygame.mixer.Sound(str(path))
+                else:
+                    self._sound_cache[cache_key] = self._pitched_sound(path, pitch)
+        except Exception as exc:
+            self._log(f"Audio clip could not be loaded: {clip}: {exc}")
+            return None
         return self._sound_cache[cache_key]
+
+    def _pitched_sound(self, path: Path, pitch: float) -> Any:
+        try:
+            import numpy as np
+        except ImportError:  # pragma: no cover - dependency is declared in pyproject
+            np = None
+
+        samples, _sample_rate = _read_mono_wav_int16(path)
+        pitched = _pitch_shift_mono_samples(samples, pitch)
+        if np is None:
+            stereo = [(sample, sample) for sample in pitched]
+        else:
+            mono = np.asarray(pitched, dtype=np.int16)
+            stereo = np.column_stack((mono, mono)).copy()
+        return self._pygame.sndarray.make_sound(stereo)
 
     def _ensure_mixer(self) -> bool:
         if self._available is not None:
@@ -254,8 +307,14 @@ class AudioSystem:
         if self.logger:
             self.logger(message)
 
+    def _log_missing_listener(self) -> None:
+        if self._missing_listener_logged:
+            return
+        self._missing_listener_logged = True
+        self._log("Audio listener missing: add an AudioListener component to the camera or another active entity.")
 
-def spatial_gains(source: AudioSource, position: Vec3, listener: Vec3 | None = None) -> tuple[float, float]:
+
+def spatial_gains(source: AudioSource, position: Vec3, listener: Vec3 | None = None, listener_rotation: Vec3 | None = None) -> tuple[float, float]:
     volume = max(0.0, min(1.0, float(source.volume)))
     if not source.spatial:
         return volume, volume
@@ -272,10 +331,37 @@ def spatial_gains(source: AudioSource, position: Vec3, listener: Vec3 | None = N
         attenuated = volume
     else:
         attenuated = volume * (1.0 - ((distance - min_distance) / (max_distance - min_distance)))
-    pan = max(-1.0, min(1.0, dx / max_distance))
+    right_x, right_z = _listener_right(listener_rotation or Vec3())
+    lateral = dx * right_x + dz * right_z
+    pan = max(-1.0, min(1.0, lateral / max_distance))
     if pan >= 0.0:
         return attenuated * (1.0 - pan), attenuated
     return attenuated, attenuated * (1.0 + pan)
+
+
+def _is_default_pitch(pitch: float) -> bool:
+    return abs(float(pitch) - 1.0) < 0.000001
+
+
+def _read_mono_wav_int16(path: Path) -> tuple[list[int], int]:
+    with wave.open(str(path), "rb") as handle:
+        channels = handle.getnchannels()
+        sample_width = handle.getsampwidth()
+        sample_rate = handle.getframerate()
+        frame_count = handle.getnframes()
+        frames = handle.readframes(frame_count)
+    if channels != 1 or sample_width != 2:
+        raise ValueError("Generated audio must be mono 16-bit WAV.")
+    return [int(value) for value in struct.unpack(f"<{len(frames) // 2}h", frames)], int(sample_rate)
+
+
+def _pitch_shift_mono_samples(samples: list[int], pitch: float) -> list[int]:
+    pitch = max(0.001, float(pitch))
+    if not samples or _is_default_pitch(pitch):
+        return list(samples)
+    target_count = max(1, int(round(len(samples) / pitch)))
+    shifted = _resample_linear([float(sample) for sample in samples], target_count)
+    return [max(-32768, min(32767, int(round(sample)))) for sample in shifted]
 
 
 def _load_wav_as_mono_int16(path: Path) -> tuple[list[int], AudioImportInfo]:
@@ -393,9 +479,18 @@ def _write_mono_wav(path: Path, samples: list[int], sample_rate: int) -> None:
         handle.writeframes(struct.pack(f"<{len(samples)}h", *samples))
 
 
-def _listener_position(scene: Scene) -> Vec3:
-    camera = scene.active_camera()
-    return _world_position(camera) if camera else Vec3()
+def _listener_pose(scene: Scene | None) -> tuple[Vec3, Vec3] | None:
+    if scene is None:
+        return None
+    listener = scene.active_audio_listener()
+    if listener is None:
+        return None
+    return _world_position(listener), _world_rotation(listener)
+
+
+def _listener_right(rotation: Vec3) -> tuple[float, float]:
+    yaw = math.radians(rotation.y)
+    return math.cos(yaw), math.sin(yaw)
 
 
 def _world_position(entity: Any | None) -> Vec3:
@@ -403,3 +498,14 @@ def _world_position(entity: Any | None) -> Vec3:
         return Vec3()
     matrix = entity.transform.world_matrix(entity)
     return Vec3(matrix[3], matrix[7], matrix[11])
+
+
+def _world_rotation(entity: Any | None) -> Vec3:
+    rotation = Vec3()
+    current = entity
+    while current is not None:
+        rotation.x += current.transform.rotation.x
+        rotation.y += current.transform.rotation.y
+        rotation.z += current.transform.rotation.z
+        current = current.parent
+    return rotation

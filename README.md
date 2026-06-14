@@ -29,7 +29,7 @@ custom `.shader` files, and Windows desktop builds through PyInstaller.
   and gizmos.
 - Automatic WAV AudioClip import with generated mono, 16-bit, max-22050 Hz
   runtime audio under `packages/P64Generated/audio/`, plus AudioSource playback
-  and simple camera-based spatial panning.
+  and simple AudioListener-based spatial panning.
 - Scene/Game viewport tabs, scene camera navigation, hierarchy selection, shared
   entity/asset inspector, asset tree, and console.
 - Asset browser file operations for user-owned `assets/`: create folders, create
@@ -67,8 +67,11 @@ Open a project directly:
 
 ```powershell
 python -m p64 hub samples\FirstScene\project.p64
-python -m p64 editor samples\FirstScene
 ```
+
+Opening a project through the Hub creates or refreshes that project's `.venv`
+and starts the editor with the project Python environment. Direct `editor` and
+`run` CLI commands use the same project environment fallback.
 
 Run or validate the sample project:
 
@@ -81,14 +84,6 @@ Refresh VSCode support files for an existing project:
 
 ```powershell
 python -m p64 vscode samples\FirstScene
-```
-
-The batch launcher opens the Hub by default:
-
-```powershell
-p64.bat
-p64.bat editor samples\FirstScene
-p64.bat run samples\FirstScene
 ```
 
 ## Documentation
@@ -163,8 +158,9 @@ WAV files under `assets/` are automatically imported as AudioClip assets when th
 editor refreshes assets or when validation/builds run. Their `.mdp64` sidecars
 store original/imported sample rates, duration, sample count, and the generated
 mono runtime WAV path. AudioSource components reference those clips, play them on
-awake if enabled, and use camera-relative distance and panning for 3D spatial
-output.
+awake if enabled, and use AudioListener-relative distance and panning for 3D
+spatial output. Add an active AudioListener component to the camera or another
+scene entity to hear runtime audio.
 
 Legacy files still load and can be migrated:
 

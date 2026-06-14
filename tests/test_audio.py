@@ -8,16 +8,27 @@ import wave
 import unittest
 
 from p64.build.pipeline import create_runtime_bundle, validate_project
-from p64.engine.audio import AudioSystem, ensure_audio_clips_for_assets, import_audio_clip, spatial_gains
-from p64.engine.components import AudioSource, Camera
+from p64.engine.audio import AudioSystem, ensure_audio_clips_for_assets, import_audio_clip, spatial_gains, _pitch_shift_mono_samples
+from p64.engine.components import AudioListener, AudioSource, Camera
 from p64.engine.entity import Entity
 from p64.engine.math import Vec3
 from p64.engine.project import Project
+from p64.engine.runtime import run_project
 from p64.engine.runtime_session import RuntimeSession
 from p64.engine.scene import Scene
 
 
 class AudioSourceTests(unittest.TestCase):
+    def test_audio_listener_serializes(self):
+        listener = AudioListener(active=False)
+        scene = Scene("Audio", [Entity("Listener", components=[listener])])
+
+        loaded = Scene.from_dict(scene.to_dict())
+        component = loaded.entities[0].components[0]
+
+        self.assertIsInstance(component, AudioListener)
+        self.assertFalse(component.active)
+
     def test_audio_source_serializes(self):
         source = AudioSource(
             clip="audio_beep",
@@ -148,6 +159,113 @@ class AudioSourceTests(unittest.TestCase):
         self.assertLess(right[0], right[1])
         self.assertEqual(far, (0.0, 0.0))
 
+    def test_spatial_gains_use_listener_rotation_for_panning(self):
+        source = AudioSource(volume=1.0, min_distance=1.0, max_distance=10.0)
+
+        right_at_yaw_zero = spatial_gains(source, Vec3(5, 0, 0), Vec3(), Vec3(0, 0, 0))
+        centered_after_turn = spatial_gains(source, Vec3(5, 0, 0), Vec3(), Vec3(0, 90, 0))
+
+        self.assertLess(right_at_yaw_zero[0], right_at_yaw_zero[1])
+        self.assertAlmostEqual(centered_after_turn[0], centered_after_turn[1])
+
+    def test_pitch_shift_resamples_mono_samples(self):
+        samples = [0, 1000, 2000, 3000]
+
+        higher = _pitch_shift_mono_samples(samples, 2.0)
+        lower = _pitch_shift_mono_samples(samples, 0.5)
+
+        self.assertEqual(len(higher), 2)
+        self.assertEqual(len(lower), 8)
+        self.assertEqual(_pitch_shift_mono_samples(samples, 1.0), samples)
+
+    def test_sound_cache_distinguishes_pitch_values(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            wav_path = project.assets_dir / "beep.wav"
+            _write_stereo_wav(wav_path, sample_rate=22050)
+            metadata = import_audio_clip(project, wav_path)
+            pygame = _FakePygame()
+            audio = AudioSystem(project)
+            audio._pygame = pygame
+            audio._available = True
+
+            normal = audio._sound_for(metadata.id, 1.0)
+            high = audio._sound_for(metadata.id, 2.0)
+            high_again = audio._sound_for(metadata.id, 2.0)
+
+            self.assertIsNot(normal, high)
+            self.assertIs(high, high_again)
+            self.assertEqual(len(pygame.mixer.sound_paths), 1)
+            self.assertEqual(len(pygame.sndarray.arrays), 1)
+            self.assertEqual(len(audio._sound_cache), 2)
+
+    def test_runtime_session_imports_audio_before_metadata_load(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            wav_path = project.assets_dir / "beep.wav"
+            _write_stereo_wav(wav_path, sample_rate=44100)
+            scene = Scene("Audio", [Entity("Speaker", components=[AudioSource(clip="audio_beep")])])
+
+            session = RuntimeSession(project, scene)
+
+            self.assertTrue(wav_path.with_suffix(".wav.mdp64").exists())
+            self.assertIn("audio_beep", session.audio._metadata)
+
+    def test_audio_system_refuses_play_without_listener(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            speaker = Entity("Speaker", components=[AudioSource(clip="audio_beep")])
+            scene = Scene("Audio", [speaker])
+            messages: list[str] = []
+            audio = AudioSystem(project, logger=messages.append)
+            audio.bind_scene(scene)
+
+            self.assertFalse(audio.play(speaker, speaker.components[0]))
+            self.assertEqual(audio._channels, {})
+            self.assertEqual(messages, ["Audio listener missing: add an AudioListener component to the camera or another active entity."])
+
+    def test_tick_stops_channels_when_listener_is_missing(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            source = AudioSource(loop=True)
+            speaker = Entity("Speaker", components=[source])
+            scene = Scene("Audio", [speaker])
+            audio = AudioSystem(project)
+            channel = _FakeChannel()
+            audio._channels[id(source)] = channel
+
+            audio.tick(scene, 1 / 60)
+
+            self.assertTrue(channel.stopped)
+            self.assertEqual(audio._channels, {})
+
+    def test_run_project_stops_preflight_session_before_window_launch(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+
+            with mock.patch("p64.engine.runtime.RuntimeSession.stop") as stop:
+                with mock.patch("p64.editor.app.launch_runtime_window") as launch:
+                    run_project(project.root)
+
+            stop.assert_called_once()
+            launch.assert_called_once()
+
+    def test_tick_removes_finished_one_shot_channels(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            source = AudioSource(loop=False)
+            speaker = Entity("Speaker", components=[source])
+            listener = Entity("Listener", components=[AudioListener()])
+            scene = Scene("Audio", [listener, speaker])
+            audio = AudioSystem(project)
+            channel = _FakeChannel(busy=False)
+            audio._channels[id(source)] = channel
+
+            audio.tick(scene, 1 / 60)
+
+            self.assertNotIn(id(source), audio._channels)
+            self.assertEqual(channel.volume_calls, [])
+
     def test_runtime_play_on_awake_and_script_methods_use_audio_system(self):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
@@ -230,6 +348,58 @@ def _write_float_wav(path: Path, sample_rate: int) -> None:
         handle.write(b"data")
         handle.write(struct.pack("<I", len(payload)))
         handle.write(payload)
+
+
+class _FakeSound:
+    def play(self, loops: int = 0):
+        return _FakeChannel()
+
+
+class _FakeMixer:
+    def __init__(self) -> None:
+        self.sound_paths: list[str] = []
+
+    def Sound(self, path: str):
+        self.sound_paths.append(path)
+        return _FakeSound()
+
+
+class _FakeSndArray:
+    def __init__(self) -> None:
+        self.arrays: list[object] = []
+
+    def make_sound(self, array):
+        self.arrays.append(array)
+        return _FakeSound()
+
+
+class _FakePygame:
+    def __init__(self) -> None:
+        self.mixer = _FakeMixer()
+        self.sndarray = _FakeSndArray()
+
+
+class _FakeChannel:
+    def __init__(self, busy: bool = True) -> None:
+        self.busy = busy
+        self.volume_calls: list[tuple[float, float]] = []
+        self.stopped = False
+        self.paused = False
+
+    def get_busy(self) -> bool:
+        return self.busy
+
+    def set_volume(self, left: float, right: float) -> None:
+        self.volume_calls.append((left, right))
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def pause(self) -> None:
+        self.paused = True
+
+    def unpause(self) -> None:
+        self.paused = False
 
 
 if __name__ == "__main__":

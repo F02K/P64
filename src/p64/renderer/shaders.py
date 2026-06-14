@@ -255,3 +255,132 @@ void main() {
     fragColor = vec4(1.0, 0.0, 1.0, 1.0);
 }
 """
+
+SKYBOX_VERTEX_SHADER = """
+#version 330
+in vec2 in_position;
+out vec2 v_uv;
+void main() {
+    v_uv = in_position * 0.5 + 0.5;
+    gl_Position = vec4(in_position, 0.0, 1.0);
+}
+"""
+
+SKYBOX_FRAGMENT_SHADER = """
+#version 330
+uniform vec3 u_skybox_top_color;
+uniform vec3 u_skybox_horizon_color;
+uniform float u_color_levels;
+uniform bool u_dithering_enabled;
+in vec2 v_uv;
+out vec4 fragColor;
+
+float dither_threshold(vec2 position) {
+    int x = int(mod(position.x, 4.0));
+    int y = int(mod(position.y, 4.0));
+    int index = x + y * 4;
+    float values[16] = float[16](
+        0.0, 8.0, 2.0, 10.0,
+        12.0, 4.0, 14.0, 6.0,
+        3.0, 11.0, 1.0, 9.0,
+        15.0, 7.0, 13.0, 5.0
+    );
+    return (values[index] / 16.0) - 0.5;
+}
+
+vec3 quantize_color(vec3 color) {
+    float levels = max(u_color_levels, 2.0);
+    vec3 adjusted = color;
+    if (u_dithering_enabled) {
+        adjusted += vec3(dither_threshold(gl_FragCoord.xy) / levels);
+    }
+    return floor(clamp(adjusted, vec3(0.0), vec3(1.0)) * levels) / levels;
+}
+
+void main() {
+    float height = smoothstep(0.0, 1.0, v_uv.y);
+    vec3 color = mix(u_skybox_horizon_color, u_skybox_top_color, height);
+    fragColor = vec4(quantize_color(color), 1.0);
+}
+"""
+
+CLOUD_PLANE_VERTEX_SHADER = """
+#version 330
+in vec3 in_position;
+uniform mat4 u_view;
+uniform mat4 u_projection;
+out vec2 v_world_xz;
+void main() {
+    v_world_xz = in_position.xz;
+    gl_Position = u_projection * u_view * vec4(in_position, 1.0);
+}
+"""
+
+CLOUD_PLANE_FRAGMENT_SHADER = """
+#version 330
+uniform vec3 u_skybox_cloud_color;
+uniform float u_skybox_cloud_coverage;
+uniform float u_skybox_cloud_scale;
+uniform float u_skybox_cloud_height;
+uniform float u_skybox_cloud_softness;
+uniform float u_color_levels;
+uniform bool u_dithering_enabled;
+in vec2 v_world_xz;
+out vec4 fragColor;
+
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 345.45));
+    p += dot(p, p + 34.345);
+    return fract(p.x * p.y);
+}
+
+float value_noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i);
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float fbm(vec2 p) {
+    return value_noise(p) * 0.58 + value_noise(p * 2.0 + 17.0) * 0.28 + value_noise(p * 4.0 + 43.0) * 0.14;
+}
+
+float dither_threshold(vec2 position) {
+    int x = int(mod(position.x, 4.0));
+    int y = int(mod(position.y, 4.0));
+    int index = x + y * 4;
+    float values[16] = float[16](
+        0.0, 8.0, 2.0, 10.0,
+        12.0, 4.0, 14.0, 6.0,
+        3.0, 11.0, 1.0, 9.0,
+        15.0, 7.0, 13.0, 5.0
+    );
+    return (values[index] / 16.0) - 0.5;
+}
+
+vec3 quantize_color(vec3 color) {
+    float levels = max(u_color_levels, 2.0);
+    vec3 adjusted = color;
+    if (u_dithering_enabled) {
+        adjusted += vec3(dither_threshold(gl_FragCoord.xy) / levels);
+    }
+    return floor(clamp(adjusted, vec3(0.0), vec3(1.0)) * levels) / levels;
+}
+
+void main() {
+    vec2 uv = v_world_xz / max(u_skybox_cloud_height, 1.0) * max(u_skybox_cloud_scale, 0.1);
+    float noise = fbm(uv);
+    float threshold = mix(0.86, 0.34, clamp(u_skybox_cloud_coverage, 0.0, 1.0));
+    float softness = max(u_skybox_cloud_softness, 0.001);
+    float cloud = smoothstep(threshold, threshold + softness, noise);
+    cloud = floor(cloud * 4.0) / 4.0;
+    if (cloud <= 0.001) {
+        discard;
+    }
+    fragColor = vec4(quantize_color(u_skybox_cloud_color), cloud * 0.9);
+}
+"""

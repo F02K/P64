@@ -15,6 +15,7 @@ from p64.editor.inspectors.components import create_inspector_mixin
 from p64.editor.ops import DirtyTracker, update_material_usage_cache
 from p64.editor.panels.assets import create_asset_browser_mixin
 from p64.editor.panels.hierarchy import create_hierarchy_mixin
+from p64.editor.undo import UndoManager, UndoState
 from p64.editor.viewport import create_viewport_class
 
 
@@ -25,6 +26,7 @@ def launch_editor(project_path: Path | None = None) -> None:
         from PySide6.QtWidgets import (
             QApplication,
             QCheckBox,
+            QColorDialog,
             QComboBox,
             QCompleter,
             QDialog,
@@ -74,7 +76,7 @@ def launch_editor(project_path: Path | None = None) -> None:
     )
     HierarchyMixin = create_hierarchy_mixin(QTreeWidgetItem, QBrush, QColor, Qt, QMenu, QInputDialog)
     InspectorMixin = create_inspector_mixin(
-        QCheckBox, QComboBox, QCompleter, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+        QCheckBox, QColorDialog, QComboBox, QCompleter, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
         QMenu, QMessageBox, QFileDialog, QPixmap, QPushButton, QSizePolicy, Qt, QVBoxLayout, QWidget
     )
 
@@ -90,8 +92,11 @@ def launch_editor(project_path: Path | None = None) -> None:
             self.selected_asset: Path | None = None
             self.current_asset_folder: Path | None = project.assets_dir if project else None
             self.dirty = DirtyTracker()
+            self.undo = UndoManager()
+            self._restoring_history = False
             self.copied_component: dict[str, Any] | None = None
             self.collapsed_components: dict[str, bool] = {}
+            self.current_transform_tool = "move"
             self.play_session: RuntimeSession | None = None
             self.asset_watcher = QFileSystemWatcher(self)
             self._updating_asset_grid = False
@@ -142,6 +147,9 @@ def launch_editor(project_path: Path | None = None) -> None:
                 self._select_entity_by_id,
                 self._log,
                 lambda: self.play_session.input if self.play_session else None,
+                self._scene_changed_live,
+                self._begin_scene_edit,
+                self._commit_scene_edit,
             )
             self.frame_clock = QElapsedTimer()
             self.frame_clock.start()
@@ -193,6 +201,14 @@ def launch_editor(project_path: Path | None = None) -> None:
             entity_button.setMenu(entity_menu)
             frame_button = QPushButton("Frame")
             frame_button.clicked.connect(self._frame_selected)
+            self.tool_buttons: dict[str, QPushButton] = {}
+            move_button = QPushButton("Move")
+            rotate_button = QPushButton("Rotate")
+            scale_button = QPushButton("Scale")
+            for tool, button in [("move", move_button), ("rotate", rotate_button), ("scale", scale_button)]:
+                button.setCheckable(True)
+                button.clicked.connect(lambda checked=False, tool=tool: self._set_transform_tool(tool))
+                self.tool_buttons[tool] = button
             self.play_button = QPushButton("Play")
             self.play_button.clicked.connect(self._toggle_playmode)
             toolbar = self.addToolBar("Project")
@@ -200,11 +216,18 @@ def launch_editor(project_path: Path | None = None) -> None:
             toolbar.addWidget(project_button)
             toolbar.addWidget(entity_button)
             toolbar.addWidget(frame_button)
+            toolbar.addSeparator()
+            toolbar.addWidget(move_button)
+            toolbar.addWidget(rotate_button)
+            toolbar.addWidget(scale_button)
+            toolbar.addSeparator()
             toolbar.addWidget(self.play_button)
 
             self.asset_watcher.directoryChanged.connect(lambda _path: self._refresh_assets_from_watcher())
             self.asset_watcher.fileChanged.connect(lambda _path: self._refresh_assets_from_watcher())
             self._install_shortcuts()
+            self._set_transform_tool("move")
+            self._reset_undo_history()
             self._refresh_all()
             self._update_window_title()
 
@@ -234,6 +257,7 @@ def launch_editor(project_path: Path | None = None) -> None:
                 self.selected = None
                 self.selected_asset = None
                 self.dirty.mark_saved()
+                self._reset_undo_history()
                 self.viewport.reload_assets()
                 self._log(f"Opened {self.project.root}")
                 self._refresh_all()
@@ -246,6 +270,7 @@ def launch_editor(project_path: Path | None = None) -> None:
                 path = self.current_scene_path or self.project.resolve_scene_path(self.project.startup_scene)
                 update_material_usage_cache(self.project, self.scene, path)
                 self.scene.save(path)
+                self.undo.mark_saved()
                 self.dirty.mark_saved()
                 self._update_window_title()
                 self._log(f"Scene saved: {path}")
@@ -371,6 +396,8 @@ def launch_editor(project_path: Path | None = None) -> None:
         def _install_shortcuts(self) -> None:
             shortcuts = [
                 ("Ctrl+S", self._save_scene),
+                ("Ctrl+Z", self._undo_scene_edit),
+                ("Ctrl+Y", self._redo_scene_edit),
                 ("Delete", self._delete_selected),
                 ("F", self._frame_selected),
                 ("Ctrl+D", self._duplicate_selected),
@@ -380,9 +407,69 @@ def launch_editor(project_path: Path | None = None) -> None:
                 shortcut = QShortcut(QKeySequence(key), self)
                 shortcut.activated.connect(callback)
 
-        def _mark_dirty(self) -> None:
-            self.dirty.mark_dirty()
+        def _mark_dirty(self, label: str = "Edit Scene") -> None:
+            if self._restoring_history:
+                return
+            if self.scene:
+                self.undo.record(label, self.scene, self.selected.id if self.selected else None)
+                self.dirty.dirty = self.undo.is_dirty
+            else:
+                self.dirty.mark_dirty()
             self._update_window_title()
+
+        def _reset_undo_history(self) -> None:
+            self.undo.reset(self.scene, self.selected.id if self.selected else None)
+            self.dirty.mark_saved()
+
+        def _begin_scene_edit(self, label: str) -> None:
+            if self.scene:
+                self.undo.begin(label, self.scene, self.selected.id if self.selected else None)
+
+        def _commit_scene_edit(self) -> None:
+            if self.scene:
+                self.undo.commit(self.scene, self.selected.id if self.selected else None)
+                self.dirty.dirty = self.undo.is_dirty
+                self._populate_inspector()
+                self._update_viewport_status()
+                self._update_window_title()
+
+        def _scene_changed_live(self) -> None:
+            self.dirty.mark_dirty()
+            self._populate_inspector()
+            self._update_viewport_status()
+            self._update_window_title()
+
+        def _undo_scene_edit(self) -> None:
+            self._restore_undo_state(self.undo.undo(), "Undo")
+
+        def _redo_scene_edit(self) -> None:
+            self._restore_undo_state(self.undo.redo(), "Redo")
+
+        def _restore_undo_state(self, state: UndoState | None, action: str) -> None:
+            if state is None or self.play_session:
+                return
+            self._restoring_history = True
+            try:
+                self.scene = Scene.from_dict(state.scene_data)
+                self.selected = self.scene.find(state.selection_id) if state.selection_id else None
+                self.selected_asset = None
+                self.dirty.dirty = self.undo.is_dirty
+                self._refresh_all()
+                if self.selected:
+                    self._select_hierarchy_item(self.selected.id)
+                self._update_viewport_status()
+                self._update_window_title()
+                self._log(f"{action}: {state.label}")
+            finally:
+                self._restoring_history = False
+
+        def _set_transform_tool(self, tool: str) -> None:
+            self.current_transform_tool = tool if tool in {"move", "rotate", "scale"} else "move"
+            for name, button in getattr(self, "tool_buttons", {}).items():
+                button.setChecked(name == self.current_transform_tool)
+            if hasattr(self.viewport, "set_transform_tool"):
+                self.viewport.set_transform_tool(self.current_transform_tool)
+            self._update_viewport_status()
 
         def _update_window_title(self) -> None:
             name = self.project.name if self.project else "No Project"

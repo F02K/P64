@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 from p64.engine.files import PROJECT_FILE, is_project_root, project_root_from_path
-from p64.hub.registry import ProjectRegistry, file_association_command, project_file_path
+from p64.engine.project import Project, ensure_project_runtime_env, is_project_runtime_env_ready
+from p64.hub.registry import ProjectRegistry, file_association_command
 
 
 def launch_hub(open_path: Path | None = None) -> None:
@@ -15,12 +17,15 @@ def launch_hub(open_path: Path | None = None) -> None:
         from PySide6.QtGui import QGuiApplication
         from PySide6.QtWidgets import (
             QApplication,
+            QDialog,
+            QDialogButtonBox,
             QFileDialog,
             QHBoxLayout,
             QInputDialog,
             QLabel,
             QMainWindow,
             QMessageBox,
+            QPlainTextEdit,
             QPushButton,
             QScrollArea,
             QVBoxLayout,
@@ -129,6 +134,7 @@ def launch_hub(open_path: Path | None = None) -> None:
                 return
             try:
                 entry = self.registry.create_project(Path(folder) / name.strip(), name=name.strip())
+                self._prepare_project_env(Project.load(entry.path))
                 self.status.setText(f"Created {entry.path}")
                 self._refresh()
             except Exception as exc:
@@ -160,11 +166,54 @@ def launch_hub(open_path: Path | None = None) -> None:
                 if not is_project_root(root):
                     raise ValueError(f"Missing {PROJECT_FILE}: {root}")
                 self.registry.mark_opened(root)
-                command = _editor_command(project_file_path(root))
-                subprocess.Popen(command, cwd=str(root))
+                project = Project.load(root)
+                self._prepare_project_env(project)
+                _launch_editor_process(project)
                 self.status.setText(f"Opened {root}")
             except Exception as exc:
                 QMessageBox.critical(self, "Open failed", str(exc))
+
+        def _prepare_project_env(self, project: Project) -> None:
+            if is_project_runtime_env_ready(project):
+                return
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Preparing Project")
+            dialog.setWindowModality(Qt.ApplicationModal)
+            dialog.resize(680, 360)
+            layout = QVBoxLayout(dialog)
+            title = QLabel(f"Preparing {project.name}")
+            title.setStyleSheet("font-size: 18px; font-weight: 700;")
+            layout.addWidget(title)
+            details = QLabel(str(project.root))
+            details.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            layout.addWidget(details)
+            output = QPlainTextEdit()
+            output.setReadOnly(True)
+            layout.addWidget(output, 1)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
+            close_button.setEnabled(False)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+
+            def log(message: str) -> None:
+                if message:
+                    output.appendPlainText(message)
+                    self.status.setText(message)
+                QApplication.processEvents()
+
+            dialog.show()
+            QApplication.processEvents()
+            try:
+                ensure_project_runtime_env(project, log)
+            except Exception as exc:
+                log(f"Project environment setup failed: {exc}")
+                close_button.setEnabled(True)
+                dialog.exec()
+                raise
+            dialog.accept()
+            QApplication.processEvents()
 
         def _remove_project(self, path: Path) -> None:
             if self.registry.remove(path):
@@ -207,7 +256,23 @@ def launch_hub(open_path: Path | None = None) -> None:
     app.exec()
 
 
-def _editor_command(project_file: Path) -> list[str]:
-    if getattr(sys, "frozen", False):
-        return [sys.executable, "--editor", str(project_file)]
-    return [sys.executable, "-m", "p64", "editor", str(project_file)]
+def _editor_command(project: Project) -> list[str]:
+    return [str(project.runtime_gui_python), "-m", "p64", "editor", str(project.project_file)]
+
+
+def _launch_editor_process(project: Project) -> subprocess.Popen[Any]:
+    return subprocess.Popen(_editor_command(project), **_editor_process_kwargs(project))
+
+
+def _editor_process_kwargs(project: Project) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"cwd": str(project.root)}
+    creationflags = _windows_no_window_creationflags()
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+    return kwargs
+
+
+def _windows_no_window_creationflags() -> int:
+    if os.name == "nt":
+        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return 0

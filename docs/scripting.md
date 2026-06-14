@@ -171,7 +171,9 @@ class PlayerController(GameScript):
 ## Audio Playback
 
 Add an `AudioSource` component to the same entity, assign an imported WAV
-AudioClip, then call `play`, `stop`, `pause`, or `resume`.
+AudioClip, then call `play`, `stop`, `pause`, or `resume`. The scene must also
+have an active `AudioListener` component, usually on the camera, or playback is
+silent.
 
 ```python
 from p64.engine.scripting import GameScript
@@ -185,7 +187,8 @@ class Footstep(GameScript):
 
 WAV files under `assets/` are automatically imported as AudioClips. Runtime
 copies are mono, 16-bit WAV files with a maximum sample rate of 22050 Hz.
-Spatial playback is handled by the runtime relative to the active camera.
+Spatial playback is handled by the runtime relative to the active
+`AudioListener` position and rotation.
 
 ## Scene Switching
 

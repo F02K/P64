@@ -88,6 +88,17 @@ class Camera(Component):
 
 
 @dataclass(slots=True)
+class AudioListener(Component):
+    active: bool = True
+    type_name: str = "AudioListener"
+
+    def to_dict(self) -> dict[str, Any]:
+        data = Component.to_dict(self)
+        data.update({"active": self.active})
+        return data
+
+
+@dataclass(slots=True)
 class Light(Component):
     kind: str = "directional"
     color: Vec3 = field(default_factory=lambda: Vec3(1.0, 0.96, 0.84))
@@ -384,6 +395,11 @@ def component_from_dict(data: dict[str, Any]) -> Component:
             near=float(data.get("near", 0.1)),
             far=float(data.get("far", 500.0)),
             active=bool(data.get("active", False)),
+        )
+    if kind == "AudioListener":
+        return AudioListener(
+            enabled=enabled,
+            active=bool(data.get("active", True)),
         )
     if kind == "Light":
         return Light(

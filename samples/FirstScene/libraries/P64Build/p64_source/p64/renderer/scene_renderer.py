@@ -7,16 +7,17 @@ from typing import Any
 
 from p64.engine.assets import AssetMetadata, discover_metadata, resolve_model_mesh
 from p64.engine.collision import collider_bounds, collider_sphere, controller_bounds
-from p64.engine.components import Camera, CharacterController, Collider, Light, MeshRenderer, SpawnPoint
+from p64.engine.components import AudioSource, Camera, CharacterController, Collider, Light, MeshRenderer, SpawnPoint
 from p64.engine.entity import Entity
 from p64.engine.material import MaterialAsset, load_material_metadata, resolve_material_reference
 from p64.engine.math import Vec3
 from p64.engine.mesh_geometry import clear_convex_hull_cache, convex_hull, mesh_triangles, transform_triangle
 from p64.engine.obj import mesh_vertices_for_group, parse_obj
 from p64.engine.project import Project
+from p64.engine.render_settings import clamp_render_settings, default_render_settings
 from p64.engine.scene import Scene
 from p64.engine.shader import default_shader_id, normalize_shader_id, parse_shader
-from p64.renderer.shaders import ERROR_FRAGMENT_SHADER, ERROR_VERTEX_SHADER, STANDARD_VERTEX_LIT_FRAGMENT_SHADER, STANDARD_VERTEX_LIT_VERTEX_SHADER
+from p64.renderer.shaders import CLOUD_PLANE_FRAGMENT_SHADER, CLOUD_PLANE_VERTEX_SHADER, ERROR_FRAGMENT_SHADER, ERROR_VERTEX_SHADER, SKYBOX_FRAGMENT_SHADER, SKYBOX_VERTEX_SHADER, STANDARD_VERTEX_LIT_FRAGMENT_SHADER, STANDARD_VERTEX_LIT_VERTEX_SHADER
 
 
 MAX_SHADER_LIGHTS = 8
@@ -122,6 +123,10 @@ class SceneRenderer:
                 }
             """,
         )
+        self.skybox_program = ctx.program(vertex_shader=SKYBOX_VERTEX_SHADER, fragment_shader=SKYBOX_FRAGMENT_SHADER)
+        self.cloud_plane_program = ctx.program(vertex_shader=CLOUD_PLANE_VERTEX_SHADER, fragment_shader=CLOUD_PLANE_FRAGMENT_SHADER)
+        self.skybox_buffer = None
+        self.skybox_vao = None
         self._program_cache: dict[str | None, Any] = {None: self.program, "__p64_error__": self.error_program}
         self._metadata: dict[str, AssetMetadata] = {}
         self._texture_cache: dict[Path, Any] = {}
@@ -161,11 +166,18 @@ class SceneRenderer:
         self.ctx.enable(self.moderngl.DEPTH_TEST)
         render_camera = camera or _camera_from_entity(scene.active_camera())
         view = _view_matrix(render_camera)
-        projection = _perspective_matrix(render_camera.fov, max(width / max(height, 1), 0.01), render_camera.near, render_camera.far)
+        aspect = max(width / max(height, 1), 0.01)
+        projection = _perspective_matrix(render_camera.fov, aspect, render_camera.near, render_camera.far)
+        render_settings = clamp_render_settings({**default_render_settings(), **scene.render_settings})
         self._current_scene = scene
         self._current_camera = render_camera
+        self._current_aspect = aspect
         self._current_view = view
         self._current_projection = projection
+        self._current_render_settings = render_settings
+        if render_settings.get("skybox_enabled", True):
+            self._draw_skybox(render_camera, render_settings)
+            self._draw_cloud_plane(render_camera, view, projection, render_settings)
         submitted = 0
         for entity in scene.walk():
             if not entity.active:
@@ -214,13 +226,82 @@ class SceneRenderer:
         return best_id
 
     def _apply_common_uniforms(self, program: Any, scene: Scene, camera: RenderCamera, view: list[float], projection: list[float]) -> None:
+        render_settings = getattr(self, "_current_render_settings", clamp_render_settings({**default_render_settings(), **scene.render_settings}))
         self._set_uniform(program, "u_view", _mat4_bytes(view), write=True)
         self._set_uniform(program, "u_projection", _mat4_bytes(projection), write=True)
-        self._set_uniform(program, "u_color_levels", float(scene.render_settings.get("color_levels", 32)))
-        self._set_uniform(program, "u_texture_filter", _texture_filter_code(str(scene.render_settings.get("texture_filter", "three_point"))))
-        self._set_uniform(program, "u_dithering_enabled", bool(scene.render_settings.get("dithering", True)))
+        self._set_uniform(program, "u_color_levels", float(render_settings.get("color_levels", 32)))
+        self._set_uniform(program, "u_texture_filter", _texture_filter_code(str(render_settings.get("texture_filter", "three_point"))))
+        self._set_uniform(program, "u_dithering_enabled", bool(render_settings.get("dithering", True)))
         self._apply_light_uniforms(program, scene)
         self._apply_fog_uniforms(program, scene, camera)
+
+    def _draw_skybox(self, camera: RenderCamera, settings: dict[str, Any]) -> None:
+        try:
+            vao = self._skybox_vertex_array()
+            self._set_uniform(self.skybox_program, "u_skybox_top_color", _color3(settings.get("skybox_top_color")))
+            self._set_uniform(self.skybox_program, "u_skybox_horizon_color", _color3(settings.get("skybox_horizon_color")))
+            self._set_uniform(self.skybox_program, "u_color_levels", float(settings.get("color_levels", 32)))
+            self._set_uniform(self.skybox_program, "u_dithering_enabled", bool(settings.get("dithering", True)))
+            self._begin_background_pass(blend=False)
+            vao.render()
+        except Exception as exc:
+            self.log(f"Skybox render failed: {exc}")
+        finally:
+            self._end_background_pass()
+
+    def _skybox_vertex_array(self) -> Any:
+        if self.skybox_vao is None:
+            import struct
+
+            vertices = [-1.0, -1.0, 3.0, -1.0, -1.0, 3.0]
+            self.skybox_buffer = self.ctx.buffer(struct.pack("6f", *vertices))
+            self.skybox_vao = self.ctx.vertex_array(self.skybox_program, [(self.skybox_buffer, "2f", "in_position")])
+        return self.skybox_vao
+
+    def _draw_cloud_plane(self, camera: RenderCamera, view: list[float], projection: list[float], settings: dict[str, Any]) -> None:
+        try:
+            import struct
+
+            vertices = cloud_plane_vertices(camera, float(settings.get("skybox_cloud_height", 80.0)))
+            buffer = self.ctx.buffer(struct.pack(f"{len(vertices)}f", *vertices))
+            vao = self.ctx.vertex_array(self.cloud_plane_program, [(buffer, "3f", "in_position")])
+            self._set_uniform(self.cloud_plane_program, "u_view", _mat4_bytes(view), write=True)
+            self._set_uniform(self.cloud_plane_program, "u_projection", _mat4_bytes(projection), write=True)
+            self._set_uniform(self.cloud_plane_program, "u_skybox_cloud_color", _color3(settings.get("skybox_cloud_color")))
+            self._set_uniform(self.cloud_plane_program, "u_skybox_cloud_coverage", float(settings.get("skybox_cloud_coverage", 0.45)))
+            self._set_uniform(self.cloud_plane_program, "u_skybox_cloud_scale", float(settings.get("skybox_cloud_scale", 3.0)))
+            self._set_uniform(self.cloud_plane_program, "u_skybox_cloud_height", float(settings.get("skybox_cloud_height", 80.0)))
+            self._set_uniform(self.cloud_plane_program, "u_skybox_cloud_softness", float(settings.get("skybox_cloud_softness", 0.08)))
+            self._set_uniform(self.cloud_plane_program, "u_color_levels", float(settings.get("color_levels", 32)))
+            self._set_uniform(self.cloud_plane_program, "u_dithering_enabled", bool(settings.get("dithering", True)))
+            self._begin_background_pass(blend=True)
+            vao.render()
+            buffer.release()
+            vao.release()
+        except Exception as exc:
+            self.log(f"Cloud plane render failed: {exc}")
+        finally:
+            self._end_background_pass()
+
+    def _begin_background_pass(self, blend: bool) -> None:
+        self._background_previous_depth_mask = getattr(self.ctx, "depth_mask", None)
+        if hasattr(self.ctx, "depth_mask"):
+            self.ctx.depth_mask = False
+        self.ctx.disable(self.moderngl.DEPTH_TEST)
+        if blend and hasattr(self.moderngl, "BLEND"):
+            self.ctx.enable(self.moderngl.BLEND)
+            if hasattr(self.ctx, "blend_func") and hasattr(self.moderngl, "SRC_ALPHA") and hasattr(self.moderngl, "ONE_MINUS_SRC_ALPHA"):
+                self.ctx.blend_func = (self.moderngl.SRC_ALPHA, self.moderngl.ONE_MINUS_SRC_ALPHA)
+
+    def _end_background_pass(self) -> None:
+        if hasattr(self.moderngl, "BLEND"):
+            try:
+                self.ctx.disable(self.moderngl.BLEND)
+            except Exception:
+                pass
+        if hasattr(self.ctx, "depth_mask") and getattr(self, "_background_previous_depth_mask", None) is not None:
+            self.ctx.depth_mask = self._background_previous_depth_mask
+        self.ctx.enable(self.moderngl.DEPTH_TEST)
 
     def _apply_light_uniforms(self, program: Any, scene: Scene) -> None:
         lights = scene.lights()[:MAX_SHADER_LIGHTS]
@@ -516,6 +597,23 @@ class SceneRenderer:
                     self._draw_world_bounds(controller_bounds(entity, component), view, projection, (0.95, 0.55, 0.18))
                 elif isinstance(component, SpawnPoint) and component.enabled:
                     self._draw_spawn_marker(entity, view, projection)
+                elif selected is entity and isinstance(component, AudioSource) and component.enabled:
+                    self._draw_audio_source_ranges(entity, component, view, projection)
+                elif selected is entity and isinstance(component, Camera) and component.enabled:
+                    self._draw_camera_frustum(entity, component, view, projection)
+
+    def _draw_audio_source_ranges(self, entity: Entity, source: AudioSource, view: list[float], projection: list[float]) -> None:
+        center = _world_position(entity)
+        min_radius, max_radius = audio_source_range_radii(source)
+        if min_radius > 0.0:
+            self._draw_world_sphere(center, min_radius, view, projection, (0.25, 0.85, 1.0))
+        if max_radius > 0.0 and max_radius != min_radius:
+            self._draw_world_sphere(center, max_radius, view, projection, (0.1, 0.45, 1.0))
+
+    def _draw_camera_frustum(self, entity: Entity, camera: Camera, view: list[float], projection: list[float]) -> None:
+        aspect = float(getattr(self, "_current_aspect", 16.0 / 9.0))
+        vertices = camera_frustum_vertices(_world_position(entity), entity.transform.rotation, camera.fov, camera.near, camera.far, aspect)
+        self._draw_lines(vertices, view, projection, (1.0, 0.78, 0.2), _identity_matrix())
 
     def _draw_spawn_marker(self, entity: Entity, view: list[float], projection: list[float]) -> None:
         p = entity.transform.position
@@ -924,6 +1022,68 @@ def _is_selected_or_child_of_selected(entity: Entity, selected: Entity | None) -
             return True
         current = current.parent
     return False
+
+
+def audio_source_range_radii(source: AudioSource) -> tuple[float, float]:
+    min_radius = max(0.0, float(source.min_distance))
+    max_radius = max(min_radius, float(source.max_distance))
+    return min_radius, max_radius
+
+
+def camera_frustum_vertices(position: Vec3, rotation: Vec3, fov: float, near: float, far: float, aspect: float) -> list[float]:
+    near = max(0.001, float(near))
+    far = max(near + 0.001, float(far))
+    aspect = max(0.01, float(aspect))
+    forward, right, up = camera_basis(rotation)
+
+    def plane_corners(distance: float) -> list[Vec3]:
+        half_height = tan(radians(max(1.0, min(179.0, float(fov)))) * 0.5) * distance
+        half_width = half_height * aspect
+        center = Vec3(
+            position.x + forward.x * distance,
+            position.y + forward.y * distance,
+            position.z + forward.z * distance,
+        )
+        return [
+            Vec3(center.x - right.x * half_width + up.x * half_height, center.y - right.y * half_width + up.y * half_height, center.z - right.z * half_width + up.z * half_height),
+            Vec3(center.x + right.x * half_width + up.x * half_height, center.y + right.y * half_width + up.y * half_height, center.z + right.z * half_width + up.z * half_height),
+            Vec3(center.x + right.x * half_width - up.x * half_height, center.y + right.y * half_width - up.y * half_height, center.z + right.z * half_width - up.z * half_height),
+            Vec3(center.x - right.x * half_width - up.x * half_height, center.y - right.y * half_width - up.y * half_height, center.z - right.z * half_width - up.z * half_height),
+        ]
+
+    near_corners = plane_corners(near)
+    far_corners = plane_corners(far)
+    vertices: list[float] = []
+    for corners in (near_corners, far_corners):
+        for start_index, end_index in ((0, 1), (1, 2), (2, 3), (3, 0)):
+            vertices.extend(_vec3_values(corners[start_index]))
+            vertices.extend(_vec3_values(corners[end_index]))
+    for index in range(4):
+        vertices.extend(_vec3_values(near_corners[index]))
+        vertices.extend(_vec3_values(far_corners[index]))
+    return vertices
+
+
+def cloud_plane_vertices(camera: RenderCamera, height: float) -> list[float]:
+    height = max(0.1, float(height))
+    y = camera.position.y + height
+    span = max(240.0, height * 8.0, camera.far * 0.75)
+    x0 = camera.position.x - span
+    x1 = camera.position.x + span
+    z0 = camera.position.z - span
+    z1 = camera.position.z + span
+    return [
+        x0, y, z0,
+        x1, y, z0,
+        x1, y, z1,
+        x0, y, z0,
+        x1, y, z1,
+        x0, y, z1,
+    ]
+
+
+def _vec3_values(value: Vec3) -> tuple[float, float, float]:
+    return (value.x, value.y, value.z)
 
 
 def grid_line_batches(camera_position: Vec3, settings: dict[str, Any]) -> list[tuple[list[float], tuple[float, float, float]]]:

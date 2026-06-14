@@ -13,10 +13,12 @@ def run_project(project_root: Path) -> None:
     if script_errors:
         for error in script_errors:
             print(f"script error: {error}")
+    scene = session.scene
+    session.stop()
 
     try:
         from p64.editor.app import launch_runtime_window
     except ImportError as exc:
         raise RuntimeError("PySide6/ModernGL runtime dependencies are required to run a project.") from exc
 
-    launch_runtime_window(project, session.scene)
+    launch_runtime_window(project, scene)

@@ -78,13 +78,14 @@ def create_hierarchy_mixin(
         def _update_viewport_status(self) -> None:
             mode = getattr(self.viewport, "view_mode", "Scene")
             speed = getattr(self.viewport, "move_speed", 0.0)
+            tool = getattr(self, "current_transform_tool", getattr(self.viewport, "transform_tool", "move")).title()
             if self.selected:
                 selection = self.selected.name
             elif self.selected_asset:
                 selection = f"Asset: {self.selected_asset.name}"
             else:
                 selection = "No selection"
-            self.viewport_status.setText(f"{mode} | Speed {speed:.1f} | {selection} | RMB+WASD/QE, Shift speed, F frame")
+            self.viewport_status.setText(f"{mode} | Tool {tool} | Speed {speed:.1f} | {selection} | RMB+WASD/QE, Shift speed, F frame")
 
         def _create_entity(self) -> None:
             if not self.scene:

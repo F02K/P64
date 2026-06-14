@@ -4,6 +4,7 @@ from unittest import mock
 import importlib.util
 import unittest
 import sys
+import wave
 import zipfile
 
 import p64.build.pipeline as build_pipeline
@@ -211,6 +212,39 @@ class ScriptingBuildTests(unittest.TestCase):
             self.assertIn(STANDARD_SHADER_RELATIVE, names)
             self.assertNotIn("libraries/builder.py", names)
             self.assertNotIn("build/temp.txt", names)
+
+    def test_runtime_bundle_forces_audio_import_before_copy(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+
+            with mock.patch.object(build_pipeline, "ensure_audio_clips_for_assets") as ensure:
+                create_runtime_bundle(project.root)
+
+            self.assertTrue(any(call.kwargs.get("force") is True for call in ensure.call_args_list))
+
+    def test_runtime_package_contains_generated_audio(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            _write_test_wav(project.assets_dir / "tone.wav")
+
+            bundle = create_runtime_bundle(project.root)
+            package = create_runtime_package(bundle)
+
+            with zipfile.ZipFile(package) as archive:
+                names = set(archive.namelist())
+            generated = [name for name in names if name.startswith("packages/P64Generated/audio/") and name.endswith(".wav")]
+            self.assertTrue(generated)
+
+    def test_runtime_package_reports_missing_generated_audio(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            _write_test_wav(project.assets_dir / "tone.wav")
+            bundle = create_runtime_bundle(project.root)
+            for path in (bundle / "packages" / "P64Generated" / "audio").glob("*.wav"):
+                path.unlink()
+
+            with self.assertRaisesRegex(RuntimeError, "generated audio"):
+                create_runtime_package(bundle)
 
     def test_validate_reports_invalid_settings(self):
         with TemporaryDirectory() as tmp:
@@ -424,6 +458,18 @@ class ScriptingBuildTests(unittest.TestCase):
             add_data = command[command.index("--add-data") + 1]
             self.assertTrue(add_data.endswith(f"{build_pipeline.os.pathsep}."))
             self.assertIn(build_pipeline.PROJECT_PACKAGE_FILE, add_data)
+            for import_name in ["pygame", "pygame.mixer", "pygame.sndarray", "numpy"]:
+                self.assertIn(import_name, command)
+            self.assertIn("--collect-submodules", command)
+            self.assertIn("--collect-binaries", command)
+
+def _write_test_wav(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8000)
+        handle.writeframes(b"\x00\x00" * 32)
 
 
 if __name__ == "__main__":

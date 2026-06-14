@@ -20,12 +20,13 @@ from p64.editor.utils.ui import make_widget_compact
 from p64.engine.assets import AssetMetadata, discover_metadata, model_meshes, resolve_model_mesh
 from p64.engine.audio import audio_info
 from p64.engine.collision import apply_mesh_primitive_defaults
-from p64.engine.components import AudioSource, Camera, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, ScriptEntry, SpawnPoint
+from p64.engine.components import AudioListener, AudioSource, Camera, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, ScriptEntry, SpawnPoint
 from p64.engine.entity import ENTITY, GAME_OBJECT, Entity, set_object_type_recursive
 from p64.engine.files import is_metadata_file
 from p64.engine.files import find_metadata_for_source
 from p64.engine.material import MaterialAsset, is_material_file, load_material_metadata, material_asset_id, resolve_material_reference
 from p64.engine.math import Vec3
+from p64.engine.render_settings import clamp_render_settings, default_render_settings
 from p64.engine.shader import discover_shaders, normalize_shader_id, parse_shader, shader_asset_id
 from p64.engine.validation import entity_reference_errors
 
@@ -33,6 +34,7 @@ from p64.engine.validation import entity_reference_errors
 AVAILABLE_COMPONENTS = (
     "MeshRenderer",
     "AudioSource",
+    "AudioListener",
     "Camera",
     "Light",
     "Fog",
@@ -42,6 +44,8 @@ AVAILABLE_COMPONENTS = (
     "EntityPhysics",
     "ScriptComponent",
 )
+
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp"}
 
 
 def component_summary(component: object) -> str:
@@ -53,13 +57,53 @@ def component_summary(component: object) -> str:
         return f"Light: {component.kind} intensity={component.intensity}"
     if isinstance(component, AudioSource):
         return f"AudioSource: {component.clip}"
+    if isinstance(component, AudioListener):
+        return f"AudioListener: active={component.active}"
     if isinstance(component, Fog):
         return f"Fog: near={component.near} far={component.far}"
     return type(component).__name__
 
 
+def _color_values(value: Any) -> list[float]:
+    if isinstance(value, Vec3):
+        values = [value.x, value.y, value.z]
+    elif isinstance(value, (list, tuple)) and len(value) >= 3:
+        values = [float(value[0]), float(value[1]), float(value[2])]
+    else:
+        values = [1.0, 1.0, 1.0]
+    return [max(0.0, min(1.0, float(item))) for item in values[:3]]
+
+
+def _color_tooltip(values: list[float]) -> str:
+    r, g, b = [round(max(0.0, min(1.0, item)) * 255) for item in values]
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def _color_button_style(values: list[float]) -> str:
+    r, g, b = [round(max(0.0, min(1.0, item)) * 255) for item in values]
+    return f"background-color: rgb({r}, {g}, {b}); border: 1px solid #111; min-height: 20px;"
+
+
+def texture_image_paths(project: Any) -> list[Path]:
+    roots = [project.assets_dir, project.packages_dir]
+    images: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        images.extend(path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
+    return sorted(images, key=lambda path: path.relative_to(project.root).as_posix().lower())
+
+
+def project_texture_reference(project: Any, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(project.root.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def create_inspector_mixin(
     QCheckBox: Any,
+    QColorDialog: Any,
     QComboBox: Any,
     QCompleter: Any,
     QFormLayout: Any,
@@ -120,7 +164,7 @@ def create_inspector_mixin(
                 self._populate_asset_inspector(self.selected_asset)
                 return
             if not self.selected:
-                self.inspector_layout.addWidget(QLabel("No SceneObject selected", self.inspector))
+                self._add_scene_render_settings_editor()
                 return
 
             self._add_entity_header()
@@ -139,6 +183,8 @@ def create_inspector_mixin(
                     self._add_light_editor(component)
                 elif isinstance(component, AudioSource):
                     self._add_audio_source_editor(component)
+                elif isinstance(component, AudioListener):
+                    self._add_audio_listener_editor(component)
                 elif isinstance(component, SpawnPoint):
                     self._add_spawn_point_editor(component)
                 elif isinstance(component, Collider):
@@ -153,6 +199,37 @@ def create_inspector_mixin(
             for component in self.selected.components:
                 if isinstance(component, MeshRenderer):
                     self._add_material_slots_editor(component)
+            self.inspector_layout.addStretch(1)
+
+        def _add_scene_render_settings_editor(self) -> None:
+            scene = getattr(self, "scene", None)
+            if scene is None:
+                self.inspector_layout.addWidget(QLabel("No SceneObject selected", self.inspector))
+                return
+            settings = self._scene_render_settings()
+            content = QWidget(self.inspector)
+            form = QFormLayout(content)
+            form.setContentsMargins(8, 6, 8, 8)
+            enabled = QCheckBox(content)
+            enabled.setChecked(bool(settings.get("skybox_enabled", True)))
+            enabled.toggled.connect(lambda checked: self._set_scene_render_bool("skybox_enabled", checked))
+            coverage = QLineEdit(str(settings.get("skybox_cloud_coverage", 0.45)), content)
+            scale = QLineEdit(str(settings.get("skybox_cloud_scale", 3.0)), content)
+            height = QLineEdit(str(settings.get("skybox_cloud_height", 80.0)), content)
+            softness = QLineEdit(str(settings.get("skybox_cloud_softness", 0.08)), content)
+            coverage.editingFinished.connect(lambda: self._set_scene_render_float(coverage, "skybox_cloud_coverage", 0.0, 1.0))
+            scale.editingFinished.connect(lambda: self._set_scene_render_float(scale, "skybox_cloud_scale", 0.1, 24.0))
+            height.editingFinished.connect(lambda: self._set_scene_render_float(height, "skybox_cloud_height", 0.1, 10000.0))
+            softness.editingFinished.connect(lambda: self._set_scene_render_float(softness, "skybox_cloud_softness", 0.0, 1.0))
+            form.addRow("Skybox Enabled", enabled)
+            form.addRow("Sky Top", self._color_editor(settings.get("skybox_top_color"), lambda values: self._set_scene_render_color("skybox_top_color", values)))
+            form.addRow("Sky Horizon", self._color_editor(settings.get("skybox_horizon_color"), lambda values: self._set_scene_render_color("skybox_horizon_color", values)))
+            form.addRow("Cloud Color", self._color_editor(settings.get("skybox_cloud_color"), lambda values: self._set_scene_render_color("skybox_cloud_color", values)))
+            form.addRow("Cloud Coverage", coverage)
+            form.addRow("Cloud Scale", scale)
+            form.addRow("Cloud Height", height)
+            form.addRow("Cloud Softness", softness)
+            self.inspector_layout.addWidget(self._foldout_panel("Scene Render Settings", "scene:render_settings", content))
             self.inspector_layout.addStretch(1)
 
         def _populate_asset_inspector(self, path: Path) -> None:
@@ -518,14 +595,15 @@ def create_inspector_mixin(
             for prop in properties:
                 if prop.kind == "texture":
                     value = material.textures.get(prop.name, str(prop.default or ""))
-                    edit = QLineEdit(str(value), parent)
-                    edit.editingFinished.connect(lambda edit=edit, name=prop.name: self._apply_material_texture(path, material, name, edit.text()))
-                    prop_form.addRow(prop.name, edit)
+                    prop_form.addRow(prop.name, self._texture_editor(path, material, prop.name, str(value)))
                 else:
                     value = material.properties.get(prop.name, prop.default)
-                    edit = QLineEdit(json.dumps(value) if isinstance(value, (list, dict)) else str(value), parent)
-                    edit.editingFinished.connect(lambda edit=edit, name=prop.name: self._apply_material_property(path, material, name, edit.text()))
-                    prop_form.addRow(prop.name, edit)
+                    if prop.kind == "color":
+                        prop_form.addRow(prop.name, self._color_editor(value, lambda values, name=prop.name: self._apply_material_color_property(path, material, name, values)))
+                    else:
+                        edit = QLineEdit(json.dumps(value) if isinstance(value, (list, dict)) else str(value), parent)
+                        edit.editingFinished.connect(lambda edit=edit, name=prop.name: self._apply_material_property(path, material, name, edit.text()))
+                        prop_form.addRow(prop.name, edit)
             if prop_form.rowCount() == 0:
                 prop_form.addRow("Properties", QLabel("No shader properties", parent))
             prop_box = QGroupBox("Properties", parent)
@@ -573,7 +651,7 @@ def create_inspector_mixin(
             near.editingFinished.connect(lambda: self._apply_float(near, component, "near"))
             far.editingFinished.connect(lambda: self._apply_float(far, component, "far"))
             density.editingFinished.connect(lambda: self._apply_float(density, component, "density"))
-            form.addRow("Color", self._vec3_editor(component.color))
+            form.addRow("Color", self._color_editor(component.color, lambda values: self._set_vec3_color(component.color, values)))
             form.addRow("Size", self._vec3_editor(component.size))
             form.addRow("Near", near)
             form.addRow("Far", far)
@@ -606,7 +684,7 @@ def create_inspector_mixin(
             intensity = QLineEdit(str(component.intensity), content)
             intensity.editingFinished.connect(lambda: self._apply_float(intensity, component, "intensity"))
             form.addRow("Kind", kind)
-            form.addRow("Color", self._vec3_editor(component.color))
+            form.addRow("Color", self._color_editor(component.color, lambda values: self._set_vec3_color(component.color, values)))
             form.addRow("Intensity", intensity)
             if component.kind in {"point", "spot"}:
                 range_edit = QLineEdit(str(component.range), content)
@@ -659,6 +737,14 @@ def create_inspector_mixin(
             form.addRow("Min Distance", min_distance)
             form.addRow("Max Distance", max_distance)
             self.inspector_layout.addWidget(self._component_panel(component, "AudioSource", content))
+
+        def _add_audio_listener_editor(self, component: AudioListener) -> None:
+            content, form = self._component_content_widget()
+            active = QCheckBox(content)
+            active.setChecked(component.active)
+            active.toggled.connect(lambda checked: self._set_audio_listener_active(component, checked))
+            form.addRow("Active", active)
+            self.inspector_layout.addWidget(self._component_panel(component, "AudioListener", content))
 
         def _add_spawn_point_editor(self, component: SpawnPoint) -> None:
             content, form = self._component_content_widget()
@@ -1010,6 +1096,8 @@ def create_inspector_mixin(
                 replacement = Light()
             elif isinstance(component, AudioSource):
                 replacement = AudioSource()
+            elif isinstance(component, AudioListener):
+                replacement = AudioListener()
             elif isinstance(component, Fog):
                 replacement = Fog()
             elif isinstance(component, ScriptComponent):
@@ -1130,6 +1218,79 @@ def create_inspector_mixin(
 
         def _set_audio_bool(self, component: AudioSource, name: str, checked: bool) -> None:
             setattr(component, name, checked)
+            self._mark_dirty()
+            self.viewport.update()
+
+        def _set_audio_listener_active(self, component: AudioListener, checked: bool) -> None:
+            component.active = checked
+            self._mark_dirty()
+            self.viewport.update()
+
+        def _scene_render_settings(self) -> dict[str, Any]:
+            scene = getattr(self, "scene", None)
+            if scene is None:
+                return default_render_settings()
+            scene.render_settings = clamp_render_settings({**default_render_settings(), **scene.render_settings})
+            return scene.render_settings
+
+        def _set_scene_render_bool(self, key: str, value: bool) -> None:
+            settings = self._scene_render_settings()
+            settings[key] = bool(value)
+            self._mark_dirty("Edit Scene Render Settings")
+            self.viewport.update()
+
+        def _set_scene_render_color(self, key: str, values: list[float]) -> None:
+            settings = self._scene_render_settings()
+            settings[key] = [float(values[0]), float(values[1]), float(values[2])]
+            clamp_render_settings(settings)
+            self._mark_dirty("Edit Scene Render Settings")
+            self.viewport.update()
+
+        def _set_scene_render_float(self, edit: Any, key: str, minimum: float, maximum: float) -> None:
+            try:
+                value = float(edit.text())
+            except ValueError:
+                self._log(f"Invalid number: {edit.text()}")
+                return
+            settings = self._scene_render_settings()
+            settings[key] = max(minimum, min(maximum, value))
+            edit.setText(str(settings[key]))
+            self._mark_dirty("Edit Scene Render Settings")
+            self.viewport.update()
+
+        def _color_editor(self, value: Any, apply_callback: Any) -> Any:
+            row = QHBoxLayout()
+            widget = QWidget(self.inspector)
+            widget.setLayout(row)
+            values = _color_values(value)
+            swatch = QPushButton("", widget)
+            swatch.setMinimumWidth(48)
+            swatch.setToolTip(_color_tooltip(values))
+            swatch.setStyleSheet(_color_button_style(values))
+            pick = QPushButton("Pick", widget)
+
+            def choose_color() -> None:
+                try:
+                    from PySide6.QtGui import QColor
+                except Exception:
+                    return
+                initial = QColor.fromRgbF(values[0], values[1], values[2])
+                color = QColorDialog.getColor(initial, self, "Choose Color")
+                if not color.isValid():
+                    return
+                apply_callback([float(color.redF()), float(color.greenF()), float(color.blueF())])
+                self._populate_inspector()
+                self.viewport.reload_assets()
+
+            swatch.clicked.connect(choose_color)
+            pick.clicked.connect(choose_color)
+            row.addWidget(swatch)
+            row.addWidget(pick)
+            row.addStretch(1)
+            return widget
+
+        def _set_vec3_color(self, vec: Vec3, values: list[float]) -> None:
+            vec.x, vec.y, vec.z = values
             self._mark_dirty()
             self.viewport.update()
 
@@ -1462,10 +1623,114 @@ def create_inspector_mixin(
             material.save(path)
             self.viewport.reload_assets()
 
+        def _apply_material_color_property(self, path: Path, material: MaterialAsset, name: str, values: list[float]) -> None:
+            material.properties[name] = [float(values[0]), float(values[1]), float(values[2])]
+            material.save(path)
+            self.viewport.reload_assets()
+
         def _apply_material_texture(self, path: Path, material: MaterialAsset, name: str, text: str) -> None:
             material.textures[name] = text
             material.save(path)
             self.viewport.reload_assets()
+
+        def _texture_editor(self, path: Path, material: MaterialAsset, name: str, value: str) -> Any:
+            row = QWidget(self.inspector)
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+            preview = QLabel(row)
+            preview.setFixedSize(34, 34)
+            preview.setStyleSheet("border: 1px solid #111; background: #202124;")
+            edit = QLineEdit(value, row)
+            pick = QPushButton("Pick", row)
+
+            def refresh_preview() -> None:
+                pixmap = self._texture_pixmap_for_reference(edit.text(), 32)
+                if pixmap is None:
+                    preview.clear()
+                    preview.setText("")
+                else:
+                    preview.setPixmap(pixmap)
+
+            def apply_value() -> None:
+                self._apply_material_texture(path, material, name, edit.text())
+                refresh_preview()
+
+            def choose() -> None:
+                selected = self._choose_texture_reference(edit.text())
+                if selected is None:
+                    return
+                edit.setText(selected)
+                apply_value()
+
+            edit.editingFinished.connect(apply_value)
+            pick.clicked.connect(choose)
+            layout.addWidget(preview)
+            layout.addWidget(edit, 1)
+            layout.addWidget(pick)
+            refresh_preview()
+            return row
+
+        def _texture_pixmap_for_reference(self, reference: str, size: int = 64) -> Any | None:
+            if not self.project or not reference:
+                return None
+            path = self._resolve_texture_reference(reference)
+            if path is None or not path.exists() or path.suffix.lower() not in IMAGE_SUFFIXES:
+                return None
+            pixmap = QPixmap(str(path))
+            if pixmap.isNull():
+                return None
+            return pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.FastTransformation)
+
+        def _resolve_texture_reference(self, reference: str) -> Path | None:
+            if not self.project:
+                return None
+            path = Path(reference)
+            if path.is_absolute():
+                return path
+            candidates = [self.project.root / reference, self.project.assets_dir / reference, self.project.packages_dir / reference]
+            return next((candidate for candidate in candidates if candidate.exists()), candidates[0] if candidates else None)
+
+        def _choose_texture_reference(self, current: str = "") -> str | None:
+            if not self.project:
+                return None
+            try:
+                from PySide6.QtCore import QSize
+                from PySide6.QtGui import QIcon
+                from PySide6.QtWidgets import QDialog, QDialogButtonBox, QListView, QListWidget, QListWidgetItem, QVBoxLayout
+            except Exception as exc:
+                self._log(f"Texture picker unavailable: {exc}")
+                return None
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Pick Texture")
+            layout = QVBoxLayout(dialog)
+            grid = QListWidget(dialog)
+            grid.setViewMode(QListView.ViewMode.IconMode)
+            grid.setResizeMode(QListView.ResizeMode.Adjust)
+            grid.setMovement(QListView.Movement.Static)
+            grid.setIconSize(QSize(72, 72))
+            grid.setGridSize(QSize(120, 104))
+            grid.setUniformItemSizes(True)
+            current_path = self._resolve_texture_reference(current)
+            for image_path in texture_image_paths(self.project):
+                reference = project_texture_reference(self.project, image_path)
+                item = QListWidgetItem(QIcon(str(image_path)), image_path.name)
+                item.setToolTip(reference)
+                item.setData(Qt.UserRole, reference)
+                grid.addItem(item)
+                if current_path and image_path.resolve() == current_path.resolve():
+                    grid.setCurrentItem(item)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            grid.itemDoubleClicked.connect(lambda _item: dialog.accept())
+            layout.addWidget(grid)
+            layout.addWidget(buttons)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            item = grid.currentItem()
+            return str(item.data(Qt.UserRole)) if item else None
 
         def _reset_material(self, path: Path) -> None:
             if not self.project:

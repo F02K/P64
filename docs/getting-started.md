@@ -21,15 +21,11 @@ python -m p64 hub
 ```
 
 The Hub can create new projects, add existing projects, open projects, and remove
-or delete registered projects.
+or delete registered projects. When the Hub opens a project, it creates or
+refreshes the project's `.venv` and starts the editor with that project Python
+environment.
 
 ## Open The Sample Project
-
-```powershell
-python -m p64 editor samples\FirstScene
-```
-
-You can also open a project file through the Hub:
 
 ```powershell
 python -m p64 hub samples\FirstScene\project.p64
@@ -42,6 +38,9 @@ Run the sample:
 ```powershell
 python -m p64 run samples\FirstScene
 ```
+
+Direct `run` and `editor` CLI commands also use the project `.venv` fallback, but
+the Hub is the recommended entry point for normal use.
 
 Validate project references, scripts, build settings, and assets:
 

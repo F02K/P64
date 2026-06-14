@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
 import sys
+import venv
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from p64.engine.builtin import BUILTIN_PACKAGE_NAME, ensure_builtin_package
 from p64.engine.components import Camera, Fog, Light
 from p64.engine.entity import Entity
 from p64.engine.files import DEFAULT_SCENE, LEGACY_DEFAULT_SCENE, PROJECT_FILE, alternate_scene_path, normalize_scene_path, project_file_for, project_root_from_path
 from p64.engine.math import Vec3
+from p64.engine.render_settings import clamp_render_settings, default_render_settings
 from p64.engine.scene import Scene
 from p64.engine.vscode import setup_vscode_project
 
@@ -84,6 +88,24 @@ class Project:
     @property
     def build_pipeline_dir(self) -> Path:
         return self.root / str(self.build_settings.get("build_pipeline_path", "libraries/P64Build"))
+
+    @property
+    def runtime_env_dir(self) -> Path:
+        return self.root / ".venv"
+
+    @property
+    def runtime_python(self) -> Path:
+        folder = "Scripts" if os.name == "nt" else "bin"
+        executable = "python.exe" if os.name == "nt" else "python"
+        return self.runtime_env_dir / folder / executable
+
+    @property
+    def runtime_gui_python(self) -> Path:
+        if os.name == "nt":
+            pythonw = self.runtime_env_dir / "Scripts" / "pythonw.exe"
+            if pythonw.exists():
+                return pythonw
+        return self.runtime_python
 
     @classmethod
     def create(cls, root: Path, name: str | None = None) -> "Project":
@@ -228,16 +250,6 @@ def default_scene(name: str) -> Scene:
     return scene
 
 
-def default_render_settings() -> dict[str, Any]:
-    return {
-        "internal_resolution": [320, 240],
-        "texture_filter": "three_point",
-        "color_levels": 32,
-        "dithering": True,
-        "fog": True,
-    }
-
-
 def default_build_settings(project_name: str = "Game") -> dict[str, Any]:
     return {
         "executable_name": project_name,
@@ -261,19 +273,6 @@ def default_editor_settings() -> dict[str, Any]:
             "fade_end": 40.0,
         }
     }
-
-
-def clamp_render_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    resolution = list(settings.get("internal_resolution", [320, 240]))
-    if len(resolution) < 2:
-        resolution = [320, 240]
-    settings["internal_resolution"] = [max(1, int(resolution[0])), max(1, int(resolution[1]))]
-    settings["color_levels"] = max(2, int(settings.get("color_levels", 32)))
-    filter_value = str(settings.get("texture_filter", "three_point"))
-    settings["texture_filter"] = filter_value if filter_value in {"nearest", "linear", "three_point"} else "three_point"
-    settings["dithering"] = bool(settings.get("dithering", True))
-    settings["fog"] = bool(settings.get("fog", True))
-    return settings
 
 
 def clamp_build_settings(settings: dict[str, Any]) -> dict[str, Any]:
@@ -315,12 +314,159 @@ def ensure_project_build_pipeline(project: Project) -> None:
     pipeline_dir = project.build_pipeline_dir
     pipeline_dir.mkdir(parents=True, exist_ok=True)
     (pipeline_dir / "builder.py").write_text(_builder_script_source(), encoding="utf-8")
-    (pipeline_dir / "requirements-build.txt").write_text("pyinstaller>=6.0\npillow>=10.0\npygame>=2.5\n", encoding="utf-8")
+    (pipeline_dir / "requirements-build.txt").write_text("pyinstaller>=6.0\npillow>=10.0\npygame>=2.5\nnumpy>=2.0\n", encoding="utf-8")
 
     source = _source_p64_package_dir()
     destination = pipeline_dir / "p64_source" / "p64"
     if source.exists():
         shutil.copytree(source, destination, dirs_exist_ok=True, ignore=_ignore_copied_source)
+
+
+def is_project_runtime_env_ready(project: Project) -> bool:
+    python = project.runtime_python
+    if not python.exists():
+        return False
+    command = [
+        str(python),
+        "-c",
+        "import pygame, PySide6, moderngl, numpy, PIL",
+    ]
+    try:
+        result = subprocess.run(command, cwd=project.root, capture_output=True, text=True, creationflags=_subprocess_creationflags())
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def ensure_project_runtime_env(project: Project, logger: Callable[[str], None] | None = None) -> Path:
+    def log(message: str) -> None:
+        if logger:
+            logger(message)
+
+    if is_project_runtime_env_ready(project):
+        return project.runtime_python
+    log(f"Preparing project Python environment: {project.runtime_env_dir}")
+    if not project.runtime_python.exists():
+        _create_project_runtime_env(project, log, stream_output=logger is not None)
+    source_root = _source_project_root()
+    install = [
+        str(project.runtime_python),
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "-e",
+        f"{source_root}[dev]",
+    ]
+    log("Installing P64 runtime/editor dependencies into project environment...")
+    _run_logged_subprocess(install, cwd=source_root, logger=logger, check=True)
+    if not is_project_runtime_env_ready(project):
+        raise RuntimeError(f"Project Python environment is not ready: {project.runtime_env_dir}")
+    return project.runtime_python
+
+
+def is_running_in_project_runtime_env(project: Project) -> bool:
+    try:
+        return Path(sys.executable).resolve() == project.runtime_python.resolve()
+    except OSError:
+        return False
+
+
+def _source_project_root() -> Path:
+    executable = Path(sys.executable).resolve()
+    candidates = [
+        _source_p64_package_dir(),
+        Path(__file__).resolve(),
+        Path.cwd().resolve(),
+        executable.parent,
+    ]
+    for candidate in candidates:
+        for parent in [candidate, *candidate.parents]:
+            if (parent / "pyproject.toml").exists():
+                return parent
+    raise RuntimeError("Could not find P64 source root with pyproject.toml for project environment install.")
+
+
+def _create_project_runtime_env(project: Project, log: Callable[[str], None], stream_output: bool = False) -> None:
+    clear = project.runtime_env_dir.exists()
+    if _can_use_current_python_for_venv():
+        venv.EnvBuilder(with_pip=True, clear=clear).create(project.runtime_env_dir)
+        return
+
+    command = _external_venv_command(project.runtime_env_dir, clear=clear)
+    if command is None:
+        raise RuntimeError(
+            "Could not find a Python interpreter to create the project environment. "
+            "Install Python 3 and make python.exe or the py launcher available on PATH."
+        )
+    log(f"Creating project environment with {command[0]}...")
+    _run_logged_subprocess(command, logger=log if stream_output else None, check=True)
+
+
+def _can_use_current_python_for_venv() -> bool:
+    if getattr(sys, "frozen", False):
+        return False
+    executable = Path(sys.executable)
+    return executable.exists() and executable.name.lower() in {"python", "python.exe", "python3", "python3.exe"}
+
+
+def _external_venv_command(env_dir: Path, clear: bool) -> list[str] | None:
+    for name in ["python", "python3"]:
+        path = shutil.which(name)
+        if path and _is_external_python(Path(path)):
+            command = [path, "-m", "venv"]
+            if clear:
+                command.append("--clear")
+            command.append(str(env_dir))
+            return command
+    launcher = shutil.which("py")
+    if launcher:
+        command = [launcher, "-3", "-m", "venv"]
+        if clear:
+            command.append("--clear")
+        command.append(str(env_dir))
+        return command
+    return None
+
+
+def _is_external_python(path: Path) -> bool:
+    try:
+        return path.resolve() != Path(sys.executable).resolve()
+    except OSError:
+        return True
+
+
+def _run_logged_subprocess(
+    command: list[str],
+    cwd: Path | None = None,
+    logger: Callable[[str], None] | None = None,
+    check: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    creationflags = _subprocess_creationflags()
+    if logger is None:
+        return subprocess.run(command, cwd=cwd, check=check, creationflags=creationflags)
+
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        creationflags=creationflags,
+    )
+    if process.stdout is not None:
+        for line in process.stdout:
+            logger(line.rstrip())
+    returncode = process.wait()
+    if check and returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+    return subprocess.CompletedProcess(command, returncode)
+
+
+def _subprocess_creationflags() -> int:
+    if os.name == "nt":
+        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return 0
 
 
 def _source_p64_package_dir() -> Path:
@@ -391,6 +537,18 @@ def main() -> int:
         str(Path(args.workpath)),
         "--specpath",
         str(Path(args.specpath)),
+        "--hidden-import",
+        "pygame",
+        "--hidden-import",
+        "pygame.mixer",
+        "--hidden-import",
+        "pygame.sndarray",
+        "--hidden-import",
+        "numpy",
+        "--collect-submodules",
+        "pygame",
+        "--collect-binaries",
+        "pygame",
         "--add-data",
         f"{Path(args.project_package)}{os.pathsep}.",
     ]

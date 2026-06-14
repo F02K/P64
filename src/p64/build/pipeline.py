@@ -39,7 +39,7 @@ def validate_project(project_root: Path) -> BuildReport:
         report.errors.append(f"Could not load project: {exc}")
         return report
     try:
-        ensure_audio_clips_for_assets(project)
+        ensure_audio_clips_for_assets(project, force=True)
     except Exception as exc:
         report.errors.append(f"Could not import audio clips: {exc}")
 
@@ -100,6 +100,13 @@ def validate_project(project_root: Path) -> BuildReport:
             continue
         if metadata.source and not (project.root / metadata.source).exists():
             report.errors.append(f"Asset source missing for {metadata.id}: {metadata.source}")
+        if metadata.kind == "audio_clip":
+            audio_settings = metadata.settings.get("audio", {})
+            generated = str(audio_settings.get("generated_path") if isinstance(audio_settings, dict) else "").strip()
+            if not generated:
+                report.errors.append(f"Audio clip has no generated WAV path: {metadata.id}")
+            elif not (project.root / generated).exists():
+                report.errors.append(f"Audio clip generated WAV missing for {metadata.id}: {generated}")
 
     for script_path in _script_files(project):
         try:
@@ -231,6 +238,10 @@ def create_runtime_package(bundle_dir: Path, output_file: Path | None = None) ->
         output_file.unlink()
 
     allowed_roots = [PROJECT_FILE, "assets", "packages", "scenes", "scripts"]
+    generated_audio = _generated_audio_paths_for_bundle(bundle_dir)
+    missing_generated = [path for path in generated_audio if not (bundle_dir / path).exists()]
+    if missing_generated:
+        raise RuntimeError("Runtime package missing generated audio:\n" + "\n".join(missing_generated))
     with zipfile.ZipFile(output_file, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name in allowed_roots:
             source = bundle_dir / name
@@ -240,7 +251,30 @@ def create_runtime_package(bundle_dir: Path, output_file: Path | None = None) ->
                 for path in sorted(source.rglob("*")):
                     if path.is_file():
                         archive.write(path, path.relative_to(bundle_dir).as_posix())
+        names = set(archive.namelist())
+        missing_from_archive = [path for path in generated_audio if path not in names]
+        if missing_from_archive:
+            raise RuntimeError("Runtime package did not include generated audio:\n" + "\n".join(missing_from_archive))
     return output_file
+
+
+def _generated_audio_paths_for_bundle(bundle_dir: Path) -> list[str]:
+    assets_dir = bundle_dir / "assets"
+    if not assets_dir.exists():
+        return []
+    generated: list[str] = []
+    for metadata_path in discover_metadata(assets_dir):
+        try:
+            metadata = AssetMetadata.load(metadata_path)
+        except Exception:
+            continue
+        if metadata.kind != "audio_clip":
+            continue
+        audio_settings = metadata.settings.get("audio", {})
+        generated_path = str(audio_settings.get("generated_path") if isinstance(audio_settings, dict) else "").strip()
+        if generated_path:
+            generated.append(Path(generated_path).as_posix())
+    return sorted(set(generated))
 
 
 def _runtime_launcher_source() -> str:

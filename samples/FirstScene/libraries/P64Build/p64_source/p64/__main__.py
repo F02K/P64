@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 from pathlib import Path
 
 from p64.build.pipeline import build_executable, build_hub_app, create_runtime_bundle, validate_project
 from p64.engine.migration import migrate_project_files
 from p64.engine.obj import import_obj_to_project
-from p64.engine.project import Project
+from p64.engine.project import Project, ensure_project_runtime_env, is_running_in_project_runtime_env
 from p64.engine.runtime import run_project
 from p64.engine.vscode import setup_vscode_project
 
@@ -63,6 +64,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "editor":
+        if args.project:
+            project = Project.load(Path(args.project))
+            if not is_running_in_project_runtime_env(project):
+                python = ensure_project_runtime_env(project, print)
+                return subprocess.run([str(python), "-m", "p64", "editor", str(project.project_file)]).returncode
         from p64.editor.app import launch_editor
 
         launch_editor(Path(args.project) if args.project else None)
@@ -75,7 +81,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "run":
-        run_project(Path(args.project))
+        project = Project.load(Path(args.project))
+        if not is_running_in_project_runtime_env(project):
+            python = ensure_project_runtime_env(project, print)
+            return subprocess.run([str(python), "-m", "p64", "run", str(project.project_file)]).returncode
+        run_project(project.root)
         return 0
 
     if args.command == "import-obj":

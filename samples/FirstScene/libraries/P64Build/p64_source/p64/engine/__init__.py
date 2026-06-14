@@ -1,5 +1,6 @@
 from p64.engine.collision import CollisionWorld
 from p64.engine.components import (
+    AudioListener,
     AudioSource,
     Camera,
     CharacterController,
@@ -21,6 +22,7 @@ from p64.engine.scripting import GameScript
 
 __all__ = [
     "Camera",
+    "AudioListener",
     "AudioSource",
     "CharacterController",
     "Collider",

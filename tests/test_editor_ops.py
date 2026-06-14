@@ -27,7 +27,7 @@ from p64.editor.ops import (
 )
 from p64.editor.panels.assets import visible_asset_paths
 from p64.engine.assets import AssetMetadata
-from p64.engine.components import Camera, Collider, EntityPhysics, MeshRenderer, ScriptComponent, ScriptEntry
+from p64.engine.components import AudioListener, Camera, Collider, EntityPhysics, MeshRenderer, ScriptComponent, ScriptEntry
 from p64.engine.files import find_metadata_for_source
 from p64.engine.material import MaterialAsset, load_material_metadata
 from p64.engine.entity import GAME_OBJECT, Entity
@@ -286,6 +286,14 @@ class EditorOpsTests(unittest.TestCase):
 
         self.assertIsInstance(physics, EntityPhysics)
         self.assertTrue(entity.is_entity)
+
+    def test_add_audio_listener_component(self):
+        entity = Entity("Camera")
+
+        listener = add_component(entity, "AudioListener")
+
+        self.assertIsInstance(listener, AudioListener)
+        self.assertTrue(listener.active)
 
     def test_validation_reports_entity_physics_on_game_object(self):
         with TemporaryDirectory() as tmp:

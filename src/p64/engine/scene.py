@@ -5,8 +5,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from p64.engine.components import Camera, Fog, Light, ScriptComponent
+from p64.engine.components import AudioListener, Camera, Fog, Light, ScriptComponent
 from p64.engine.entity import Entity
+from p64.engine.render_settings import clamp_render_settings, default_render_settings
 
 
 @dataclass
@@ -59,6 +60,15 @@ class Scene:
                         return entity
         return fallback
 
+    def active_audio_listener(self) -> Entity | None:
+        for entity in self.walk():
+            if not entity.active:
+                continue
+            for component in entity.components:
+                if isinstance(component, AudioListener) and component.enabled and component.active:
+                    return entity
+        return None
+
     def lights(self) -> list[tuple[Entity, Light]]:
         return [
             (entity, component)
@@ -99,7 +109,7 @@ class Scene:
     def from_dict(cls, data: dict[str, Any]) -> "Scene":
         return cls(
             name=str(data.get("name", "Scene")),
-            render_settings=dict(data.get("render_settings", {})),
+            render_settings=clamp_render_settings({**default_render_settings(), **dict(data.get("render_settings", {}))}),
             entities=[Entity.from_dict(item) for item in data.get("entities", [])],
         )
 

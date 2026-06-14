@@ -111,6 +111,18 @@ def create_asset_browser_mixin(
                 if icon_path.exists():
                     return QIcon(str(icon_path))
                 return self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+            if is_preview_image(path):
+                try:
+                    from PySide6.QtGui import QPixmap
+
+                    pixmap = QPixmap(str(path))
+                    if not pixmap.isNull():
+                        size = self.assets.iconSize()
+                        width = max(size.width(), 64)
+                        height = max(size.height(), 64)
+                        return QIcon(pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.FastTransformation))
+                except Exception:
+                    pass
             return self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
 
         def _asset_folder_selection_changed(self) -> None:
