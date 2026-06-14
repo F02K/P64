@@ -8,6 +8,7 @@ from p64.engine.migration import migrate_project_files
 from p64.engine.obj import import_obj_to_project
 from p64.engine.project import Project
 from p64.engine.runtime import run_project
+from p64.engine.vscode import setup_vscode_project
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -34,6 +35,9 @@ def main(argv: list[str] | None = None) -> int:
 
     validate_cmd = sub.add_parser("validate", help="Validate a P64 project.")
     validate_cmd.add_argument("project")
+
+    vscode_cmd = sub.add_parser("vscode", help="Create or refresh VSCode setup for a P64 project.")
+    vscode_cmd.add_argument("project")
 
     bundle_cmd = sub.add_parser("bundle", help="Create a runnable project bundle.")
     bundle_cmd.add_argument("project")
@@ -87,6 +91,12 @@ def main(argv: list[str] | None = None) -> int:
         for error in report.errors:
             print(f"error: {error}")
         return 0 if report.ok else 1
+
+    if args.command == "vscode":
+        project = Project.load(Path(args.project))
+        setup_vscode_project(project)
+        print(f"VSCode setup refreshed: {project.root}")
+        return 0
 
     if args.command == "bundle":
         bundle = create_runtime_bundle(Path(args.project), Path(args.out) if args.out else None)

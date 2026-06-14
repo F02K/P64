@@ -111,6 +111,56 @@ class Light(Component):
 
 
 @dataclass(slots=True)
+class AudioSource(Component):
+    clip: str = ""
+    volume: float = 1.0
+    pitch: float = 1.0
+    loop: bool = False
+    play_on_awake: bool = True
+    spatial: bool = True
+    min_distance: float = 1.0
+    max_distance: float = 25.0
+    _runtime_audio: Any | None = field(default=None, repr=False, compare=False)
+    _runtime_entity: Any | None = field(default=None, repr=False, compare=False)
+    type_name: str = "AudioSource"
+
+    def bind_runtime(self, audio: Any, entity: Any) -> None:
+        self._runtime_audio = audio
+        self._runtime_entity = entity
+
+    def play(self) -> bool:
+        if self._runtime_audio is None or self._runtime_entity is None:
+            return False
+        return bool(self._runtime_audio.play(self._runtime_entity, self))
+
+    def stop(self) -> None:
+        if self._runtime_audio is not None:
+            self._runtime_audio.stop(self)
+
+    def pause(self) -> None:
+        if self._runtime_audio is not None:
+            self._runtime_audio.pause(self)
+
+    def resume(self) -> None:
+        if self._runtime_audio is not None:
+            self._runtime_audio.resume(self)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = Component.to_dict(self)
+        data.update({
+            "clip": self.clip,
+            "volume": self.volume,
+            "pitch": self.pitch,
+            "loop": self.loop,
+            "play_on_awake": self.play_on_awake,
+            "spatial": self.spatial,
+            "min_distance": self.min_distance,
+            "max_distance": self.max_distance,
+        })
+        return data
+
+
+@dataclass(slots=True)
 class Fog(Component):
     color: Vec3 = field(default_factory=lambda: Vec3(0.46, 0.58, 0.72))
     size: Vec3 = field(default_factory=lambda: Vec3(60.0, 30.0, 60.0))
@@ -344,6 +394,18 @@ def component_from_dict(data: dict[str, Any]) -> Component:
             range=float(data.get("range", 12.0)),
             spot_angle=float(data.get("spot_angle", 45.0)),
             falloff=float(data.get("falloff", 2.0)),
+        )
+    if kind == "AudioSource":
+        return AudioSource(
+            enabled=enabled,
+            clip=str(data.get("clip", "")),
+            volume=float(data.get("volume", 1.0)),
+            pitch=float(data.get("pitch", 1.0)),
+            loop=bool(data.get("loop", False)),
+            play_on_awake=bool(data.get("play_on_awake", True)),
+            spatial=bool(data.get("spatial", True)),
+            min_distance=float(data.get("min_distance", 1.0)),
+            max_distance=float(data.get("max_distance", 25.0)),
         )
     if kind == "Fog":
         return Fog(

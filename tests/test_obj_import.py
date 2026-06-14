@@ -99,10 +99,55 @@ class ObjImportTests(unittest.TestCase):
             imported = scene.entities[-1]
 
             self.assertEqual(metadata.groups, ["Floor", "Door"])
+            model = metadata.settings["model"]
+            self.assertEqual(model["import_version"], 1)
+            self.assertEqual([mesh["name"] for mesh in model["meshes"]], ["Floor", "Door"])
+            self.assertTrue(all(mesh["id"].startswith(f"mesh_{metadata.id}_") for mesh in model["meshes"]))
+            self.assertEqual(model["meshes"][0]["triangle_count"], 2)
+            self.assertEqual(model["meshes"][0]["bounds"]["min"], [0.0, 0.0, 0.0])
+            self.assertGreater(len(model["meshes"][0]["wireframe"]["vertices"]), 0)
             self.assertTrue((project.assets_dir / "scene.obj.mdp64").exists())
             self.assertTrue(imported.is_game_object)
             self.assertEqual([child.name for child in imported.children], ["Floor", "Door"])
             self.assertTrue(all(child.is_game_object for child in imported.children))
+            self.assertEqual(imported.children[0].components[0].mesh, model["meshes"][0]["id"])
+
+    def test_import_obj_records_per_mesh_material_slots(self):
+        with TemporaryDirectory() as tmp:
+            obj = Path(tmp) / "multi_material.obj"
+            obj.write_text(
+                "mtllib multi_material.mtl\n"
+                "o Body\n"
+                "v 0 0 0\n"
+                "v 1 0 0\n"
+                "v 1 1 0\n"
+                "v 0 1 0\n"
+                "usemtl Stone\n"
+                "f 1 2 3\n"
+                "usemtl Moss\n"
+                "f 1 3 4\n",
+                encoding="utf-8",
+            )
+            (Path(tmp) / "multi_material.mtl").write_text("newmtl Stone\nnewmtl Moss\n", encoding="utf-8")
+            project = Project.create(Path(tmp) / "Game")
+
+            metadata = import_obj_to_project(project, obj)
+
+            mesh = metadata.settings["model"]["meshes"][0]
+            self.assertEqual(mesh["material_slots"], ["Stone", "Moss"])
+            self.assertEqual(mesh["triangle_count"], 2)
+
+    def test_reimport_obj_preserves_existing_metadata_id(self):
+        with TemporaryDirectory() as tmp:
+            obj = Path(tmp) / "scene.obj"
+            obj.write_text(OBJ_TEXT, encoding="utf-8")
+            project = Project.create(Path(tmp) / "Game")
+            first = import_obj_to_project(project, obj)
+
+            second = import_obj_to_project(project, project.root / first.source)
+
+            self.assertEqual(second.id, first.id)
+            self.assertIn("model", second.settings)
 
     def test_mtl_parser_resolves_diffuse_texture(self):
         mtl = Path("samples/FirstScene/assets/Ocarina/model.mtl")
@@ -123,6 +168,8 @@ class ObjImportTests(unittest.TestCase):
         self.assertIsNotNone(first_vertex.normal)
 
     def test_recursive_asset_discovery_sees_ocarina_files(self):
+        if not Path("samples/FirstScene/assets/Ocarina/model.obj").exists():
+            self.skipTest("Ocarina sample asset is not present")
         assets = [path.as_posix() for path in discover_assets(Path("samples/FirstScene/assets"))]
         self.assertIn("samples/FirstScene/assets/Ocarina/model.obj", assets)
         self.assertIn("samples/FirstScene/assets/Ocarina/0.png", assets)

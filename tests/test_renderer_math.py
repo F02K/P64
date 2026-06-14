@@ -189,6 +189,21 @@ class RendererMathTests(unittest.TestCase):
             values = struct.unpack(f"{MESH_VERTEX_FLOATS}f", mesh.buffer.data[: MESH_VERTEX_FLOATS * 4])
             self.assertEqual(values[8:11], (1.0, 1.0, 1.0))
 
+    def test_renderer_loads_concrete_model_mesh_entry(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_pick_mesh(project, "target.obj", x_offset=0.0, z=0.0)
+            mesh_id = metadata.settings["model"]["meshes"][0]["id"]
+            renderer = _renderer(project)
+            entity = Entity("Target")
+            component = MeshRenderer(mesh=mesh_id)
+
+            mesh = renderer._load_mesh(entity, component)
+            vertices = _mesh_collider_wire_vertices(project, component)
+
+            self.assertIsNotNone(mesh)
+            self.assertEqual(len(vertices), 18)
+
     def test_mesh_vao_still_requires_position_attribute(self):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
@@ -447,6 +462,38 @@ class RendererMathTests(unittest.TestCase):
             program = renderer._program_for(next(iter(renderer._mesh_cache.values())).shader)
             self.assertEqual(program.uniforms["u_base_color"].value, (0.8, 0.1, 0.2))
             self.assertEqual(program.uniforms["u_custom_float"].value, 0.6)
+
+    def test_renderer_splits_model_mesh_into_material_batches(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            obj = Path(tmp) / "multi_material.obj"
+            obj.write_text(
+                "mtllib multi_material.mtl\n"
+                "o Body\n"
+                "v 0 0 0\n"
+                "v 1 0 0\n"
+                "v 1 1 0\n"
+                "v 0 1 0\n"
+                "usemtl Stone\n"
+                "f 1 2 3\n"
+                "usemtl Moss\n"
+                "f 1 3 4\n",
+                encoding="utf-8",
+            )
+            (Path(tmp) / "multi_material.mtl").write_text("newmtl Stone\nKd 0.2 0.2 0.2\nnewmtl Moss\nKd 0.1 0.5 0.1\n", encoding="utf-8")
+            metadata = import_obj_to_project(project, obj)
+            mesh_id = metadata.settings["model"]["meshes"][0]["id"]
+            entity = Entity("Target")
+            entity.add_component(MeshRenderer(mesh=mesh_id, source_materials=["Stone", "Moss"], material_slots=[None, None]))
+            scene = Scene("Test", [entity])
+            renderer = _renderer(project)
+
+            renderer.render(scene, 800, 800, camera=RenderCamera(Vec3(0, 0, 5), Vec3()), show_grid=False)
+
+            render_mesh = next(iter(renderer._mesh_cache.values()))
+            self.assertIsNotNone(render_mesh.batches)
+            self.assertEqual(len(render_mesh.batches or []), 2)
+            self.assertEqual(sum(batch.vao.render_count for batch in render_mesh.batches or []), 2)
 
     def test_selection_outline_vao_is_cached_with_render_mesh_and_cleared_on_reload(self):
         with TemporaryDirectory() as tmp:

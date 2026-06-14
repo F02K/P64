@@ -49,6 +49,14 @@ Validate project references, scripts, build settings, and assets:
 python -m p64 validate samples\FirstScene
 ```
 
+Refresh VSCode/Pylance support for an existing project:
+
+```powershell
+python -m p64 vscode samples\FirstScene
+```
+
+New projects receive the same setup automatically.
+
 ## Next Steps
 
 - Use [editor.md](editor.md) to learn the editor workflow.

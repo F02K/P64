@@ -45,9 +45,12 @@ class DocumentationTests(unittest.TestCase):
     def test_scripting_docs_match_real_api_names(self):
         text = (DOCS / "scripting.md").read_text(encoding="utf-8")
 
-        self.assertTrue(hasattr(scripting, "UserScript"))
-        self.assertTrue(hasattr(scripting.UserScript, "persistent"))
-        self.assertTrue(hasattr(scripting.UserScript, "move_character"))
+        self.assertTrue(hasattr(scripting, "GameScript"))
+        self.assertFalse(hasattr(scripting, "UserScript"))
+        self.assertTrue(hasattr(scripting.GameScript, "persistent"))
+        self.assertTrue(hasattr(scripting.GameScript, "move_character"))
+        self.assertTrue(hasattr(scripting.GameScript, "on_start"))
+        self.assertTrue(hasattr(scripting.GameScript, "on_update"))
         for name in [
             "self.entity",
             "self.transform",

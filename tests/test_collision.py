@@ -70,8 +70,8 @@ class CollisionTests(unittest.TestCase):
             project = Project.create(Path(tmp) / "Game")
             (project.scripts_dir / "move_player.py").write_text(
                 "from p64.engine.math import Vec3\n"
-                "from p64.engine.scripting import UserScript\n"
-                "class MovePlayer(UserScript):\n"
+                "from p64.engine.scripting import GameScript\n"
+                "class MovePlayer(GameScript):\n"
                 "    def on_update(self, dt):\n"
                 "        self.character_controller.move(Vec3(0.25, 0.0, 0.0), dt)\n",
                 encoding="utf-8",

@@ -14,6 +14,7 @@
     {
       "id": "camera",
       "name": "Camera",
+      "object_type": "entity",
       "active": true,
       "persistent": false,
       "transform": {
@@ -48,6 +49,7 @@
     {
       "id": "sun",
       "name": "Sun",
+      "object_type": "entity",
       "active": true,
       "persistent": false,
       "transform": {
@@ -77,7 +79,10 @@
             0.96,
             0.84
           ],
-          "intensity": 1.25
+          "intensity": 1.25,
+          "range": 12.0,
+          "spot_angle": 45.0,
+          "falloff": 2.0
         }
       ],
       "children": []
@@ -85,6 +90,7 @@
     {
       "id": "fog",
       "name": "Fog",
+      "object_type": "entity",
       "active": true,
       "persistent": false,
       "transform": {
@@ -128,6 +134,7 @@
     {
       "id": "251cb156c9e5477b846598925e8d5250",
       "name": "sample_level",
+      "object_type": "entity",
       "active": true,
       "persistent": false,
       "transform": {
@@ -152,6 +159,7 @@
         {
           "id": "dc50f6ab5c7b404da2e623d34c335b52",
           "name": "Floor",
+          "object_type": "entity",
           "active": true,
           "persistent": false,
           "transform": {
@@ -179,6 +187,10 @@
               "submesh": "Floor",
               "material": "Ground",
               "shader": null,
+              "source_materials": [],
+              "material_slots": [
+                null
+              ],
               "visible": true
             }
           ],
@@ -187,6 +199,7 @@
         {
           "id": "2f9f630e7d62414d9b0b039f9716d0bb",
           "name": "Door",
+          "object_type": "entity",
           "active": true,
           "persistent": false,
           "transform": {
@@ -214,12 +227,66 @@
               "submesh": "Door",
               "material": "Door",
               "shader": null,
+              "source_materials": [],
+              "material_slots": [
+                null
+              ],
               "visible": true
+            },
+            {
+              "type": "ScriptComponent",
+              "enabled": true,
+              "scripts": [
+                {
+                  "script": "spin.py",
+                  "class_name": "Spin",
+                  "enabled": true
+                }
+              ]
             }
           ],
           "children": []
         }
       ]
+    },
+    {
+      "id": "f0633892c7604d2f9a5a2ea4dfd92a26",
+      "name": "Entity",
+      "object_type": "entity",
+      "active": true,
+      "persistent": false,
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [
+        {
+          "type": "AudioSource",
+          "enabled": true,
+          "clip": "audio_ding",
+          "volume": 1.0,
+          "pitch": 1.0,
+          "loop": true,
+          "play_on_awake": true,
+          "spatial": true,
+          "min_distance": 99.0,
+          "max_distance": 100.0
+        }
+      ],
+      "children": []
     }
   ]
 }

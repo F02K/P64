@@ -1,7 +1,7 @@
-from p64.engine.scripting import UserScript
+from p64.engine.scripting import GameScript
 
 
-class Spin(UserScript):
+class Spin(GameScript):
     speed = 45.0
 
     def on_update(self, dt):

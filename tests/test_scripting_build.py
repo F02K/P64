@@ -22,8 +22,8 @@ class ScriptingBuildTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
             (project.scripts_dir / "spin.py").write_text(
-                "from p64.engine.scripting import UserScript\n"
-                "class Spin(UserScript):\n"
+                "from p64.engine.scripting import GameScript\n"
+                "class Spin(GameScript):\n"
                 "    speed = 60\n"
                 "    def on_start(self):\n"
                 "        self.started = True\n"
@@ -42,12 +42,50 @@ class ScriptingBuildTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(reloaded.transform.rotation.y, 0)
 
+    def test_runtime_script_can_import_generated_project_api(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            (project.scripts_dir / "reader.py").write_text(
+                "from p64.engine.scripting import GameScript\n"
+                "from p64_project_api import SCENE_NAME_MAIN\n"
+                "class Reader(GameScript):\n"
+                "    def on_update(self, dt):\n"
+                "        self.entity.name = SCENE_NAME_MAIN\n",
+                encoding="utf-8",
+            )
+            scene = project.load_startup_scene()
+            actor = Entity("Actor")
+            actor.add_component(ScriptComponent(scripts=[ScriptEntry(script="reader.py", class_name="Reader")]))
+            scene.add_entity(actor)
+
+            session = RuntimeSession(project, scene)
+            self.assertEqual(session.tick(1 / 60), [])
+            self.assertEqual(session.scene.find(actor.id).name, "main")
+
+    def test_legacy_gamescript_name_is_not_available(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            (project.scripts_dir / "old.py").write_text(
+                "from p64.engine.scripting import UserScript\n"
+                "class Old(UserScript):\n"
+                "    pass\n",
+                encoding="utf-8",
+            )
+            scene = project.load_startup_scene()
+            actor = Entity("Actor")
+            actor.add_component(ScriptComponent(scripts=[ScriptEntry(script="old.py", class_name="Old")]))
+            scene.add_entity(actor)
+
+            errors = RuntimeSession(project, scene).tick(1 / 60)
+
+            self.assertTrue(any("UserScript" in error for error in errors))
+
     def test_runtime_session_runs_start_once_and_update_each_tick(self):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
             (project.scripts_dir / "counter.py").write_text(
-                "from p64.engine.scripting import UserScript\n"
-                "class Counter(UserScript):\n"
+                "from p64.engine.scripting import GameScript\n"
+                "class Counter(GameScript):\n"
                 "    def on_start(self):\n"
                 "        self.transform.position.x += 10\n"
                 "    def on_update(self, dt):\n"
@@ -72,8 +110,8 @@ class ScriptingBuildTests(unittest.TestCase):
             project = Project.create(Path(tmp) / "Game")
             (project.scripts_dir / "push.py").write_text(
                 "from p64.engine.math import Vec3\n"
-                "from p64.engine.scripting import UserScript\n"
-                "class Push(UserScript):\n"
+                "from p64.engine.scripting import GameScript\n"
+                "class Push(GameScript):\n"
                 "    def on_update(self, dt):\n"
                 "        self.entity_physics.add_force(Vec3(4.0, 0.0, 0.0))\n",
                 encoding="utf-8",
@@ -97,8 +135,8 @@ class ScriptingBuildTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
             (project.scripts_dir / "move.py").write_text(
-                "from p64.engine.scripting import UserScript\n"
-                "class Move(UserScript):\n"
+                "from p64.engine.scripting import GameScript\n"
+                "class Move(GameScript):\n"
                 "    def on_update(self, dt):\n"
                 "        self.transform.position.x += 5\n",
                 encoding="utf-8",
@@ -119,8 +157,8 @@ class ScriptingBuildTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
             (project.scripts_dir / "bad.py").write_text(
-                "from p64.engine.scripting import UserScript\n"
-                "class Bad(UserScript):\n"
+                "from p64.engine.scripting import GameScript\n"
+                "class Bad(GameScript):\n"
                 "    def on_start(self):\n"
                 "        raise RuntimeError('should not run')\n",
                 encoding="utf-8",
@@ -191,8 +229,8 @@ class ScriptingBuildTests(unittest.TestCase):
             project = Project.create(Path(tmp) / "Game")
             Scene("Second", [Entity("Marker")]).save(project.scenes_dir / "second.scenep64")
             (project.scripts_dir / "switcher.py").write_text(
-                "from p64.engine.scripting import UserScript\n"
-                "class Switcher(UserScript):\n"
+                "from p64.engine.scripting import GameScript\n"
+                "class Switcher(GameScript):\n"
                 "    def on_update(self, dt):\n"
                 "        self.scene_manager.load_scene_by_name('second')\n",
                 encoding="utf-8",
@@ -214,8 +252,8 @@ class ScriptingBuildTests(unittest.TestCase):
             project = Project.create(Path(tmp) / "Game")
             Scene("Second", [Entity("Marker")]).save(project.scenes_dir / "second.scenep64")
             (project.scripts_dir / "switcher.py").write_text(
-                "from p64.engine.scripting import UserScript\n"
-                "class Switcher(UserScript):\n"
+                "from p64.engine.scripting import GameScript\n"
+                "class Switcher(GameScript):\n"
                 "    def on_update(self, dt):\n"
                 "        self.scene_manager.load_scene_by_name('second')\n",
                 encoding="utf-8",

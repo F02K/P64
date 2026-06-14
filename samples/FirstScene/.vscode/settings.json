@@ -1,0 +1,10 @@
+{
+  "python.analysis.extraPaths": [
+    "assets/scripts",
+    "packages/P64Generated/python",
+    "libraries/P64Build/p64_source",
+    "E:/Github/P64/src"
+  ],
+  "python.analysis.autoImportCompletions": true,
+  "python.analysis.typeCheckingMode": "basic"
+}

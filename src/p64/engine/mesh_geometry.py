@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from math import sqrt
 from typing import Iterable
 
-from p64.engine.assets import AssetMetadata, discover_metadata
+from p64.engine.assets import AssetMetadata, discover_metadata, resolve_model_mesh
 from p64.engine.components import MeshRenderer
 from p64.engine.entity import Entity
 from p64.engine.math import Vec3
@@ -34,6 +34,10 @@ def mesh_renderer_for(entity: Entity) -> MeshRenderer | None:
 
 
 def mesh_bounds(project: Project, component: MeshRenderer) -> tuple[Vec3, Vec3] | None:
+    metadata, mesh = resolve_model_mesh(_metadata_by_id(project), component.mesh, component.submesh)
+    bounds = mesh.get("bounds") if mesh else None
+    if isinstance(bounds, dict) and isinstance(bounds.get("min"), list) and isinstance(bounds.get("max"), list):
+        return (Vec3.from_value(bounds["min"]), Vec3.from_value(bounds["max"]))
     positions = [position for triangle in mesh_triangles(project, component) for position in triangle]
     if not positions:
         return None
@@ -44,11 +48,12 @@ def mesh_bounds(project: Project, component: MeshRenderer) -> tuple[Vec3, Vec3] 
 
 
 def mesh_triangles(project: Project, component: MeshRenderer) -> list[Triangle]:
-    metadata = _metadata_by_id(project).get(component.mesh)
+    metadata, mesh = resolve_model_mesh(_metadata_by_id(project), component.mesh, component.submesh)
     if metadata is None:
         return []
     obj_mesh = parse_obj(project.root / metadata.source)
-    group = next((item for item in obj_mesh.groups if item.name == component.submesh), obj_mesh.groups[0] if obj_mesh.groups else None)
+    group_name = str(mesh.get("source_group")) if mesh and mesh.get("source_group") else component.submesh
+    group = next((item for item in obj_mesh.groups if item.name == group_name), obj_mesh.groups[0] if obj_mesh.groups else None)
     if group is None:
         return []
     return [tuple(vertex.position for vertex in face.vertices) for face in group.faces if len(face.vertices) == 3]

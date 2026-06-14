@@ -12,18 +12,7 @@ from p64.engine.validation import asset_metadata_by_id, entity_reference_errors,
 
 
 def virtual_submesh_labels(entity: Entity, metadata_for_mesh: Callable[[str], AssetMetadata | None]) -> list[str]:
-    child_names = {child.name for child in entity.children}
-    labels: list[str] = []
-    for component in entity.components:
-        if not isinstance(component, MeshRenderer):
-            continue
-        metadata = metadata_for_mesh(component.mesh)
-        if not metadata:
-            continue
-        for group in metadata.groups:
-            if group not in child_names:
-                labels.append(f"{group}  [submesh]")
-    return labels
+    return []
 
 
 def create_hierarchy_mixin(

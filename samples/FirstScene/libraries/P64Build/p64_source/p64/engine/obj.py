@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from p64.engine.assets import AssetMetadata
+from p64.engine.assets import AssetMetadata, model_meshes, safe_model_mesh_id
 from p64.engine.components import MeshRenderer
 from p64.engine.entity import GAME_OBJECT, Entity
 from p64.engine.files import metadata_path_for_source
@@ -166,27 +166,41 @@ def import_obj_to_project(project: Project, obj_path: Path, add_to_startup_scene
     _copy_material_dependencies(obj_path, destination)
     mesh = parse_obj(destination)
     source = destination.resolve().relative_to(project.root.resolve()).as_posix()
+    metadata_path = metadata_path_for_source(destination)
+    existing = AssetMetadata.load(metadata_path) if metadata_path.exists() else None
+    metadata_id = existing.id if existing else f"mesh_{destination.stem}_{uuid4().hex[:8]}"
+    settings = dict(existing.settings) if existing else {}
+    settings.update({
+        "import_mode": "model",
+        "model": model_settings_for_obj(metadata_id, mesh),
+        "mtllibs": mesh.mtllibs,
+        "material_defs": {name: material.to_dict() for name, material in mesh.material_defs.items()},
+    })
     metadata = AssetMetadata(
-        id=f"mesh_{destination.stem}_{uuid4().hex[:8]}",
+        id=metadata_id,
         kind="obj_mesh",
         source=source,
         groups=mesh.group_names,
         materials=mesh.materials,
-        settings={
-            "import_mode": "groups_as_nodes",
-            "mtllibs": mesh.mtllibs,
-            "material_defs": {name: material.to_dict() for name, material in mesh.material_defs.items()},
-        },
+        settings=settings,
     )
-    metadata.save(metadata_path_for_source(destination))
+    metadata.save(metadata_path)
 
     if add_to_startup_scene:
         scene = project.load_startup_scene()
         root = Entity(destination.stem, object_type=GAME_OBJECT)
-        for group in mesh.groups:
-            child = Entity(group.name, object_type=GAME_OBJECT)
-            material = group.faces[0].material if group.faces else None
-            child.add_component(MeshRenderer(mesh=metadata.id, submesh=group.name, material=material, source_materials=list(metadata.materials)))
+        for mesh_entry in model_meshes(metadata):
+            child = Entity(str(mesh_entry.get("name") or "Mesh"), object_type=GAME_OBJECT)
+            source_materials = [str(item) for item in mesh_entry.get("material_slots", [])]
+            material = source_materials[0] if source_materials else None
+            child.add_component(
+                MeshRenderer(
+                    mesh=str(mesh_entry.get("id") or ""),
+                    material=material,
+                    source_materials=source_materials,
+                    material_slots=[None for _material in source_materials],
+                )
+            )
             root.add_child(child)
         scene.add_entity(root)
         project.save_startup_scene(scene)
@@ -194,14 +208,86 @@ def import_obj_to_project(project: Project, obj_path: Path, add_to_startup_scene
     return metadata
 
 
-def mesh_vertices_for_group(group: ObjGroup) -> list[float]:
+def mesh_vertices_for_group(group: ObjGroup, material: str | None = None) -> list[float]:
     vertices: list[float] = []
     for face in group.faces:
+        if material is not None and face.material != material:
+            continue
         for vertex in face.vertices:
             vertices.extend(vertex.position)
             vertices.extend(vertex.texcoord or (0.0, 0.0))
             vertices.extend(vertex.normal or (0.0, 1.0, 0.0))
             vertices.extend(vertex.color or (1.0, 1.0, 1.0))
+    return vertices
+
+
+def model_settings_for_obj(metadata_id: str, mesh: ObjMesh) -> dict[str, object]:
+    used_ids: dict[str, int] = {}
+    mesh_entries: list[dict[str, object]] = []
+    nodes: list[dict[str, object]] = []
+    for group in mesh.groups:
+        base_id = safe_model_mesh_id(metadata_id, group.name)
+        index = used_ids.get(base_id, 0)
+        used_ids[base_id] = index + 1
+        mesh_id = safe_model_mesh_id(metadata_id, group.name, index)
+        material_slots = _group_materials(group)
+        mesh_entries.append({
+            "id": mesh_id,
+            "name": group.name.split("/")[-1] or group.name,
+            "source_group": group.name,
+            "node_path": group.name,
+            "material_slots": material_slots,
+            "bounds": _group_bounds(group),
+            "triangle_count": len(group.faces),
+            "vertex_count": sum(len(face.vertices) for face in group.faces),
+            "wireframe": {"vertices": _wireframe_vertices(group)},
+        })
+        nodes.append({
+            "name": group.name.split("/")[-1] or group.name,
+            "path": group.name,
+            "mesh": mesh_id,
+            "children": [],
+        })
+    return {
+        "import_version": 1,
+        "nodes": nodes,
+        "meshes": mesh_entries,
+        "materials": mesh.materials,
+    }
+
+
+def _group_materials(group: ObjGroup) -> list[str]:
+    materials: list[str] = []
+    for face in group.faces:
+        if face.material and face.material not in materials:
+            materials.append(face.material)
+    return materials
+
+
+def _group_bounds(group: ObjGroup) -> dict[str, list[float]]:
+    positions = [vertex.position for face in group.faces for vertex in face.vertices]
+    if not positions:
+        return {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}
+    return {
+        "min": [min(position[index] for position in positions) for index in range(3)],
+        "max": [max(position[index] for position in positions) for index in range(3)],
+    }
+
+
+def _wireframe_vertices(group: ObjGroup) -> list[float]:
+    vertices: list[float] = []
+    seen: set[tuple[tuple[float, float, float], tuple[float, float, float]]] = set()
+    for face in group.faces:
+        points = [vertex.position for vertex in face.vertices]
+        for start, end in [(points[0], points[1]), (points[1], points[2]), (points[2], points[0])]:
+            a = tuple(round(value, 5) for value in start)
+            b = tuple(round(value, 5) for value in end)
+            key = (a, b) if a <= b else (b, a)
+            if key in seen:
+                continue
+            seen.add(key)
+            vertices.extend(start)
+            vertices.extend(end)
     return vertices
 
 

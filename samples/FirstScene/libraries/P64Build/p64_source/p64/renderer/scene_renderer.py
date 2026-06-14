@@ -5,7 +5,7 @@ from math import cos, radians, sin, tan
 from pathlib import Path
 from typing import Any
 
-from p64.engine.assets import AssetMetadata, discover_metadata
+from p64.engine.assets import AssetMetadata, discover_metadata, resolve_model_mesh
 from p64.engine.collision import collider_bounds, collider_sphere, controller_bounds
 from p64.engine.components import Camera, CharacterController, Collider, Light, MeshRenderer, SpawnPoint
 from p64.engine.entity import Entity
@@ -27,6 +27,17 @@ MESH_OUTLINE_LAYOUT = "3f 8x 3f 12x"
 
 
 @dataclass
+class RenderMeshBatch:
+    vao: Any
+    buffer: Any
+    vertex_count: int
+    texture: Any
+    shader: str | None
+    base_color: tuple[float, float, float]
+    material_properties: dict[str, Any] | None = None
+
+
+@dataclass
 class RenderMesh:
     vao: Any
     buffer: Any
@@ -36,6 +47,7 @@ class RenderMesh:
     shader: str | None
     base_color: tuple[float, float, float]
     material_properties: dict[str, Any] | None = None
+    batches: list[RenderMeshBatch] | None = None
     outline_vao: Any | None = None
     edge_mesh: RenderLineMesh | None = None
 
@@ -305,6 +317,18 @@ class SceneRenderer:
         if scene is not None:
             self._apply_common_uniforms(program, scene, render_camera, view, projection)
         self._set_uniform(program, "u_model", _mat4_bytes(entity.transform.world_matrix(entity)), write=True)
+        if mesh.batches:
+            for batch in mesh.batches:
+                batch_program = self._program_for(batch.shader)
+                if scene is not None:
+                    self._apply_common_uniforms(batch_program, scene, render_camera, view, projection)
+                self._set_uniform(batch_program, "u_model", _mat4_bytes(entity.transform.world_matrix(entity)), write=True)
+                batch.texture.use(location=0)
+                self._set_uniform(batch_program, "u_texture", 0)
+                self._set_uniform(batch_program, "u_base_color", batch.base_color)
+                self._apply_material_properties(batch_program, batch.material_properties)
+                batch.vao.render()
+            return True
         mesh.texture.use(location=0)
         self._set_uniform(program, "u_texture", 0)
         self._set_uniform(program, "u_base_color", mesh.base_color)
@@ -316,7 +340,7 @@ class SceneRenderer:
         cache_key = (component.mesh, component.submesh, component.material, component.shader, tuple(component.source_materials), tuple(component.material_slots))
         if cache_key in self._mesh_cache:
             return self._mesh_cache[cache_key]
-        metadata = self._metadata.get(component.mesh)
+        metadata, mesh_entry = resolve_model_mesh(self._metadata, component.mesh, component.submesh)
         if metadata is None:
             self.log(f"Missing mesh metadata: {component.mesh}")
             return None
@@ -326,7 +350,8 @@ class SceneRenderer:
         except Exception as exc:
             self.log(f"Could not parse {obj_path}: {exc}")
             return None
-        group = next((item for item in obj_mesh.groups if item.name == component.submesh), obj_mesh.groups[0] if obj_mesh.groups else None)
+        group_name = str(mesh_entry.get("source_group")) if mesh_entry and mesh_entry.get("source_group") else component.submesh
+        group = next((item for item in obj_mesh.groups if item.name == group_name), obj_mesh.groups[0] if obj_mesh.groups else None)
         if group is None:
             return None
         vertices = mesh_vertices_for_group(group)
@@ -339,7 +364,8 @@ class SceneRenderer:
         except Exception as exc:
             self.log(f"Could not build mesh buffer for {entity.name}: {exc}")
             return None
-        material = component.material or (group.faces[0].material if group.faces else None)
+        source_materials = component.source_materials or _mesh_entry_materials(mesh_entry) or list(metadata.materials)
+        material = component.material or (source_materials[0] if len(source_materials) == 1 else None) or (group.faces[0].material if group.faces else None)
         material_asset_path = self._material_slot_path(component, metadata, material)
         material_asset = self._load_material_asset(material_asset_path)
         shader = material_asset.shader if material_asset is not None else component.shader
@@ -360,9 +386,55 @@ class SceneRenderer:
             shader=shader,
             base_color=base_color,
             material_properties=dict(material_asset.properties) if material_asset is not None else None,
+            batches=self._mesh_material_batches(group, component, metadata, obj_mesh),
         )
         self._mesh_cache[cache_key] = mesh
         return mesh
+
+    def _mesh_material_batches(
+        self,
+        group: Any,
+        component: MeshRenderer,
+        metadata: AssetMetadata,
+        obj_mesh: Any,
+    ) -> list[RenderMeshBatch] | None:
+        materials = [component.material] if component.material else _group_materials(group)
+        materials = [material for material in materials if material]
+        if len(materials) <= 1:
+            return None
+        batches: list[RenderMeshBatch] = []
+        for material in materials:
+            vertices = mesh_vertices_for_group(group, material)
+            if not vertices:
+                continue
+            try:
+                import struct
+
+                buffer = self.ctx.buffer(struct.pack(f"{len(vertices)}f", *vertices))
+            except Exception as exc:
+                self.log(f"Could not build material batch for {component.mesh}: {exc}")
+                continue
+            material_asset_path = self._material_slot_path(component, metadata, material)
+            material_asset = self._load_material_asset(material_asset_path)
+            shader = material_asset.shader if material_asset is not None else component.shader
+            program = self._program_for(shader)
+            try:
+                vao = self._mesh_vertex_array(program, buffer)
+            except Exception as exc:
+                self.log(f"Could not bind material batch for {component.mesh}: {exc}")
+                continue
+            batches.append(
+                RenderMeshBatch(
+                    vao=vao,
+                    buffer=buffer,
+                    vertex_count=len(vertices) // MESH_VERTEX_FLOATS,
+                    texture=self._texture_for(metadata, material, material_asset, material_asset_path),
+                    shader=shader,
+                    base_color=self._base_color_for(metadata, obj_mesh, material, material_asset),
+                    material_properties=dict(material_asset.properties) if material_asset is not None else None,
+                )
+            )
+        return batches or None
 
     def _draw_grid(self, view: list[float], projection: list[float]) -> None:
         camera = getattr(self, "_current_camera", RenderCamera(position=Vec3(), rotation=Vec3()))
@@ -1007,6 +1079,11 @@ def _screen_ray(camera: RenderCamera, width: int, height: int, screen_x: float, 
 
 
 def _mesh_collider_wire_vertices(project: Project, component: MeshRenderer) -> list[float]:
+    metadata, mesh = resolve_model_mesh(_metadata_by_id(project), component.mesh, component.submesh)
+    wireframe = mesh.get("wireframe") if mesh else None
+    vertices = wireframe.get("vertices") if isinstance(wireframe, dict) else None
+    if isinstance(vertices, list):
+        return [float(value) for value in vertices]
     vertices: list[float] = []
     for triangle in mesh_triangles(project, component):
         for start, end in [(triangle[0], triangle[1]), (triangle[1], triangle[2]), (triangle[2], triangle[0])]:
@@ -1071,3 +1148,30 @@ def _mat4_bytes(matrix: list[float]) -> bytes:
     # Engine matrices are row-major; OpenGL uniforms are consumed column-major.
     column_major = [matrix[row * 4 + col] for col in range(4) for row in range(4)]
     return struct.pack("16f", *column_major)
+
+
+def _group_materials(group: Any) -> list[str]:
+    materials: list[str] = []
+    for face in getattr(group, "faces", []):
+        material = getattr(face, "material", None)
+        if material and material not in materials:
+            materials.append(material)
+    return materials
+
+
+def _mesh_entry_materials(mesh_entry: dict[str, Any] | None) -> list[str]:
+    if not mesh_entry:
+        return []
+    values = mesh_entry.get("material_slots", [])
+    return [str(value) for value in values if value]
+
+
+def _metadata_by_id(project: Project) -> dict[str, AssetMetadata]:
+    metadata_by_id: dict[str, AssetMetadata] = {}
+    for metadata_path in discover_metadata(project.assets_dir):
+        try:
+            metadata = AssetMetadata.load(metadata_path)
+        except Exception:
+            continue
+        metadata_by_id[metadata.id] = metadata
+    return metadata_by_id

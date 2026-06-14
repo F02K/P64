@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 import shutil
 import unittest
 
+from p64.__main__ import main as p64_main
 from p64.engine.builtin import LEGACY_STANDARD_SHADER_RELATIVE, STANDARD_SHADER_RELATIVE, STANDARD_UNLIT_SHADER_RELATIVE
 from p64.engine.components import EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, ScriptEntry, SpawnPoint
 from p64.engine.entity import GAME_OBJECT, Entity, set_object_type_recursive
@@ -11,6 +12,7 @@ from p64.engine.math import Vec3
 from p64.engine.project import Project, _builder_script_source, _source_p64_package_dir
 from p64.engine.scene import Scene
 from p64.engine.scene_manager import SceneManager
+from p64.engine.vscode import setup_vscode_project
 
 
 class ProjectSceneTests(unittest.TestCase):
@@ -31,12 +33,60 @@ class ProjectSceneTests(unittest.TestCase):
             self.assertTrue((project.root / STANDARD_UNLIT_SHADER_RELATIVE).exists())
             self.assertTrue((project.root / "libraries" / "P64Build" / "builder.py").exists())
             self.assertTrue((project.root / "libraries" / "P64Build" / "requirements-build.txt").exists())
+            self.assertTrue((project.root / ".vscode" / "settings.json").exists())
+            self.assertTrue((project.root / ".vscode" / "tasks.json").exists())
+            self.assertTrue((project.root / ".vscode" / "extensions.json").exists())
+            self.assertTrue((project.root / ".vscode" / "launch.json").exists())
+            self.assertTrue(project.project_api_path.exists())
+            self.assertFalse((project.scripts_dir / "p64_project_api.py").exists())
             requirements = (project.root / "libraries" / "P64Build" / "requirements-build.txt").read_text(encoding="utf-8")
             self.assertIn("pygame>=2.5", requirements)
             self.assertTrue((project.root / "libraries" / "P64Build" / "p64_source" / "p64" / "engine" / "runtime.py").exists())
             self.assertTrue((project.root / "assets").exists())
             self.assertIsNotNone(reloaded.active_camera())
             self.assertEqual(reloaded.entities[-1].name, "Thing")
+
+    def test_vscode_setup_merges_existing_files_and_generates_project_api(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            settings_path = project.root / ".vscode" / "settings.json"
+            tasks_path = project.root / ".vscode" / "tasks.json"
+            settings_path.write_text(
+                '{"editor.tabSize": 2, "python.analysis.extraPaths": ["custom"]}\n',
+                encoding="utf-8",
+            )
+            tasks_path.write_text(
+                '{"version": "2.0.0", "tasks": [{"label": "Custom", "type": "shell", "command": "echo ok"}]}\n',
+                encoding="utf-8",
+            )
+            Scene("Second").save(project.scenes_dir / "second.scenep64")
+            (project.assets_dir / "texture.png").write_text("", encoding="utf-8")
+
+            setup_vscode_project(project)
+
+            import json
+
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(settings["editor.tabSize"], 2)
+            self.assertIn("custom", settings["python.analysis.extraPaths"])
+            self.assertIn("assets/scripts", settings["python.analysis.extraPaths"])
+            self.assertIn("packages/P64Generated/python", settings["python.analysis.extraPaths"])
+            tasks = json.loads(tasks_path.read_text(encoding="utf-8"))["tasks"]
+            self.assertTrue(any(task["label"] == "Custom" for task in tasks))
+            self.assertTrue(any(task["label"] == "P64: Validate" for task in tasks))
+            api = project.project_api_path.read_text(encoding="utf-8")
+            self.assertIn('SCENE_NAME_SECOND = "second"', api)
+            self.assertIn('ASSET_PNG_TEXTURE = "assets/texture.png"', api)
+
+    def test_vscode_cli_refreshes_setup(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            (project.root / ".vscode" / "tasks.json").unlink()
+
+            result = p64_main(["vscode", str(project.root)])
+
+            self.assertEqual(result, 0)
+            self.assertTrue((project.root / ".vscode" / "tasks.json").exists())
 
     def test_project_settings_roundtrip_and_defaults(self):
         with TemporaryDirectory() as tmp:

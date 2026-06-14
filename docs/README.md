@@ -9,10 +9,10 @@ want to try the engine, inspect the editor workflow, or write gameplay scripts.
    the sample project, and validate a project.
 2. [Editor](editor.md) - learn the scene hierarchy, inspector, asset browser,
    and editable project files.
-3. [Scripting](scripting.md) - write Python `UserScript` classes with input,
+3. [Scripting](scripting.md) - write Python `GameScript` classes with input,
    movement, physics, scene switching, and persistence.
 4. [Project Structure](project-structure.md) - understand `assets/`, generated
-   metadata, builtin packages, and build support files.
+   metadata, VSCode support, builtin packages, and build support files.
 5. [Rendering](rendering.md) - use materials, shader properties, built-in
    Lit/Unlit shaders, and render settings.
 6. [Building](building.md) - validate, bundle, and build desktop executables.

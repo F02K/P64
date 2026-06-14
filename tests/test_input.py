@@ -108,8 +108,8 @@ class InputTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
             (project.scripts_dir / "input_probe.py").write_text(
-                "from p64.engine.scripting import UserScript\n"
-                "class InputProbe(UserScript):\n"
+                "from p64.engine.scripting import GameScript\n"
+                "class InputProbe(GameScript):\n"
                 "    def on_update(self, dt):\n"
                 "        if self.input.was_key_pressed('space'):\n"
                 "            self.transform.position.x += 1\n"

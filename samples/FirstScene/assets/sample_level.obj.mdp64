@@ -11,6 +11,170 @@
     "Door"
   ],
   "settings": {
-    "import_mode": "groups_as_nodes"
+    "import_mode": "model",
+    "model": {
+      "import_version": 1,
+      "nodes": [
+        {
+          "name": "Floor",
+          "path": "Floor",
+          "mesh": "mesh_mesh_sample_level_floor",
+          "children": []
+        },
+        {
+          "name": "Door",
+          "path": "Door",
+          "mesh": "mesh_mesh_sample_level_door",
+          "children": []
+        }
+      ],
+      "meshes": [
+        {
+          "id": "mesh_mesh_sample_level_floor",
+          "name": "Floor",
+          "source_group": "Floor",
+          "node_path": "Floor",
+          "material_slots": [
+            "Ground"
+          ],
+          "bounds": {
+            "min": [
+              -3.0,
+              0.0,
+              -3.0
+            ],
+            "max": [
+              3.0,
+              0.0,
+              3.0
+            ]
+          },
+          "triangle_count": 2,
+          "vertex_count": 6,
+          "wireframe": {
+            "vertices": [
+              -3.0,
+              0.0,
+              -3.0,
+              3.0,
+              0.0,
+              -3.0,
+              3.0,
+              0.0,
+              -3.0,
+              3.0,
+              0.0,
+              3.0,
+              3.0,
+              0.0,
+              3.0,
+              -3.0,
+              0.0,
+              -3.0,
+              3.0,
+              0.0,
+              3.0,
+              -3.0,
+              0.0,
+              3.0,
+              -3.0,
+              0.0,
+              3.0,
+              -3.0,
+              0.0,
+              -3.0
+            ]
+          }
+        },
+        {
+          "id": "mesh_mesh_sample_level_door",
+          "name": "Door",
+          "source_group": "Door",
+          "node_path": "Door",
+          "material_slots": [
+            "Door"
+          ],
+          "bounds": {
+            "min": [
+              -0.5,
+              0.0,
+              -1.0
+            ],
+            "max": [
+              0.5,
+              2.0,
+              -1.0
+            ]
+          },
+          "triangle_count": 2,
+          "vertex_count": 6,
+          "wireframe": {
+            "vertices": [
+              -0.5,
+              0.0,
+              -1.0,
+              0.5,
+              0.0,
+              -1.0,
+              0.5,
+              0.0,
+              -1.0,
+              0.5,
+              2.0,
+              -1.0,
+              0.5,
+              2.0,
+              -1.0,
+              -0.5,
+              0.0,
+              -1.0,
+              0.5,
+              2.0,
+              -1.0,
+              -0.5,
+              2.0,
+              -1.0,
+              -0.5,
+              2.0,
+              -1.0,
+              -0.5,
+              0.0,
+              -1.0
+            ]
+          }
+        }
+      ],
+      "materials": [
+        "Ground",
+        "Door"
+      ]
+    },
+    "mtllibs": [
+      "sample_level.mtl"
+    ],
+    "material_defs": {
+      "Ground": {
+        "name": "Ground",
+        "diffuse_color": [
+          0.36,
+          0.5,
+          0.28
+        ],
+        "diffuse_texture": null,
+        "specular_texture": null,
+        "bump_texture": null
+      },
+      "Door": {
+        "name": "Door",
+        "diffuse_color": [
+          0.42,
+          0.22,
+          0.12
+        ],
+        "diffuse_texture": null,
+        "specular_texture": null,
+        "bump_texture": null
+      }
+    }
   }
 }

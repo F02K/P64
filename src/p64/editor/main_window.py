@@ -4,9 +4,11 @@ from pathlib import Path
 from typing import Any
 
 from p64.engine.entity import Entity
+from p64.engine.audio import ensure_audio_clips_for_assets
 from p64.engine.project import Project
 from p64.engine.runtime_session import RuntimeSession
 from p64.engine.scene import Scene
+from p64.engine.vscode import setup_vscode_project
 from p64.editor.dialogs.build_settings import open_build_settings_dialog
 from p64.editor.dialogs.project_settings import open_project_settings_dialog
 from p64.editor.inspectors.components import create_inspector_mixin
@@ -179,6 +181,7 @@ def launch_editor(project_path: Path | None = None) -> None:
             project_button = QPushButton("Project")
             project_menu = QMenu(project_button)
             project_menu.addAction("Save Scene", self._save_scene)
+            project_menu.addAction("Setup VSCode", self._setup_vscode)
             project_menu.addAction("Project Settings", self._open_project_settings)
             project_menu.addAction("Build Settings", self._open_build_settings)
             project_button.setMenu(project_menu)
@@ -322,6 +325,7 @@ def launch_editor(project_path: Path | None = None) -> None:
             if not self.play_session:
                 return
             self.play_session.input.set_cursor_mode("normal")
+            self.play_session.stop()
             self.viewport.reset_runtime_cursor()
             self.play_session = None
             self.play_button.setText("Play")
@@ -352,6 +356,17 @@ def launch_editor(project_path: Path | None = None) -> None:
                 self._log("Build settings saved.")
 
             open_build_settings_dialog(self, self.project, on_saved, self._build_bundle, self._build_project)
+
+        def _setup_vscode(self) -> None:
+            if not self.project:
+                self._log("No project open.")
+                return
+            try:
+                setup_vscode_project(self.project)
+                self._refresh_assets_from_watcher()
+                self._log("VSCode setup refreshed.")
+            except Exception as exc:
+                QMessageBox.critical(self, "VSCode setup failed", str(exc))
 
         def _install_shortcuts(self) -> None:
             shortcuts = [
@@ -396,12 +411,18 @@ def launch_editor(project_path: Path | None = None) -> None:
             self._log(f"{mode} view active.")
 
         def _refresh_all(self) -> None:
+            if self.project:
+                for metadata in ensure_audio_clips_for_assets(self.project):
+                    self._log(f"Imported audio clip: {metadata.id}")
             self._populate_hierarchy()
             self._populate_assets()
             self._populate_inspector()
             self.viewport.update()
 
         def _refresh_assets_from_watcher(self) -> None:
+            if self.project:
+                for metadata in ensure_audio_clips_for_assets(self.project):
+                    self._log(f"Imported audio clip: {metadata.id}")
             self._populate_assets()
             self.viewport.reload_assets()
 

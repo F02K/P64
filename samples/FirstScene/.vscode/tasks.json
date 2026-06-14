@@ -1,0 +1,84 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "shell",
+      "command": "python",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "label": "P64: Validate",
+      "args": [
+        "-m",
+        "p64",
+        "validate",
+        "${workspaceFolder}"
+      ],
+      "group": "test"
+    },
+    {
+      "type": "shell",
+      "command": "python",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "label": "P64: Run",
+      "args": [
+        "-m",
+        "p64",
+        "run",
+        "${workspaceFolder}"
+      ],
+      "group": "build"
+    },
+    {
+      "type": "shell",
+      "command": "python",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "label": "P64: Open Editor",
+      "args": [
+        "-m",
+        "p64",
+        "editor",
+        "${workspaceFolder}"
+      ]
+    },
+    {
+      "type": "shell",
+      "command": "python",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "label": "P64: Bundle",
+      "args": [
+        "-m",
+        "p64",
+        "bundle",
+        "${workspaceFolder}"
+      ],
+      "group": "build"
+    },
+    {
+      "type": "shell",
+      "command": "python",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "label": "P64: Build",
+      "args": [
+        "-m",
+        "p64",
+        "build",
+        "${workspaceFolder}"
+      ],
+      "group": "build"
+    }
+  ]
+}

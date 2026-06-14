@@ -1,0 +1,22 @@
+{
+  "id": "audio_ding",
+  "kind": "audio_clip",
+  "source": "assets/audio/Ding.wav",
+  "groups": [],
+  "materials": [],
+  "settings": {
+    "audio": {
+      "import_version": 1,
+      "original_sample_rate": 44100,
+      "original_channels": 2,
+      "original_sample_width": 2,
+      "imported_sample_rate": 22050,
+      "channels": 1,
+      "sample_width": 2,
+      "sample_count": 21361,
+      "duration": 0.9687528344671201,
+      "loopable": true,
+      "generated_path": "packages/P64Generated/audio/audio_ding.wav"
+    }
+  }
+}

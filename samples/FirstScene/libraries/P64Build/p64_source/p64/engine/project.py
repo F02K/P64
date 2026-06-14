@@ -13,6 +13,7 @@ from p64.engine.entity import Entity
 from p64.engine.files import DEFAULT_SCENE, LEGACY_DEFAULT_SCENE, PROJECT_FILE, alternate_scene_path, normalize_scene_path, project_file_for, project_root_from_path
 from p64.engine.math import Vec3
 from p64.engine.scene import Scene
+from p64.engine.vscode import setup_vscode_project
 
 
 @dataclass
@@ -57,6 +58,22 @@ class Project:
         return self.packages_dir / BUILTIN_PACKAGE_NAME
 
     @property
+    def generated_package_dir(self) -> Path:
+        return self.packages_dir / "P64Generated"
+
+    @property
+    def project_api_dir(self) -> Path:
+        return self.generated_package_dir / "python"
+
+    @property
+    def project_api_path(self) -> Path:
+        return self.project_api_dir / "p64_project_api.py"
+
+    @property
+    def generated_audio_dir(self) -> Path:
+        return self.generated_package_dir / "audio"
+
+    @property
     def build_dir(self) -> Path:
         return self.root / "build"
 
@@ -89,6 +106,7 @@ class Project:
         scene.render_settings = dict(project.render_settings)
         scene.save(root / project.startup_scene)
         project.save()
+        setup_vscode_project(project)
         return project
 
     @classmethod
@@ -115,6 +133,7 @@ class Project:
         self.scenes_dir.mkdir(parents=True, exist_ok=True)
         self.scripts_dir.mkdir(parents=True, exist_ok=True)
         self.packages_dir.mkdir(exist_ok=True)
+        self.generated_audio_dir.mkdir(parents=True, exist_ok=True)
         ensure_builtin_package(self.root)
         self.libraries_dir.mkdir(exist_ok=True)
         ensure_project_build_pipeline(self)

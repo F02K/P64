@@ -1,11 +1,22 @@
 # Scripting
 
 P64 gameplay code is written as Python classes that usually inherit from
-`p64.engine.scripting.UserScript`. Attach scripts through a `ScriptComponent` in
+`p64.engine.scripting.GameScript`. Attach scripts through a `ScriptComponent` in
 the editor inspector.
 
 Scripts normally live in `assets/scripts/`. A script entry points to a Python file
 and a class name.
+
+New projects include VSCode/Pylance support files automatically. For existing
+projects, use `Project > Setup VSCode` in the editor or:
+
+```powershell
+python -m p64 vscode path\to\project
+```
+
+This refreshes `.vscode/` and regenerates
+`packages/P64Generated/python/p64_project_api.py`, which exposes project
+constants for scenes, assets, and common input names.
 
 ## Lifecycle
 
@@ -16,7 +27,7 @@ and a class name.
 
 ## Available Fields
 
-Every `UserScript` instance receives these fields:
+Every `GameScript` instance receives these fields:
 
 - `self.entity`: the entity that owns the script
 - `self.transform`: shortcut to `self.entity.transform`
@@ -27,27 +38,28 @@ Every `UserScript` instance receives these fields:
 - `self.time`: current runtime time value passed by the engine
 - `self.character_controller`: the entity's `CharacterController`, if present
 - `self.entity_physics`: the entity's `EntityPhysics`, if present
+- `self.audio_source`: the entity's first `AudioSource`, if present
 
 ## Rotate An Object
 
 ```python
-from p64.engine.scripting import UserScript
+from p64.engine.scripting import GameScript
 
 
-class Spin(UserScript):
+class Spin(GameScript):
     speed = 90.0
 
-    def on_update(self, dt):
+    def on_update(self, dt: float) -> None:
         self.transform.rotation.y += self.speed * dt
 ```
 
 ## Keyboard Movement
 
 ```python
-from p64.engine.scripting import UserScript
+from p64.engine.scripting import GameScript
 
 
-class KeyboardMove(UserScript):
+class KeyboardMove(GameScript):
     speed = 4.0
 
     def on_update(self, dt):
@@ -67,10 +79,10 @@ Key names are lowercase strings such as `"w"`, `"a"`, `"space"`, `"escape"`,
 Use `was_key_pressed` and `was_key_released` for actions that should happen once.
 
 ```python
-from p64.engine.scripting import UserScript
+from p64.engine.scripting import GameScript
 
 
-class JumpProbe(UserScript):
+class JumpProbe(GameScript):
     def on_update(self, dt):
         if self.input.was_key_pressed("space"):
             self.transform.position.y += 1.0
@@ -88,10 +100,10 @@ Controller axes and buttons use normalized names. The first controller can use
 names such as `"left_x"`, `"left_y"`, `"right_x"`, `"south"`, and `"start"`.
 
 ```python
-from p64.engine.scripting import UserScript
+from p64.engine.scripting import GameScript
 
 
-class ControllerMove(UserScript):
+class ControllerMove(GameScript):
     speed = 5.0
 
     def on_update(self, dt):
@@ -110,10 +122,10 @@ Add an `EntityPhysics` component to the same entity, then use
 
 ```python
 from p64.engine.math import Vec3
-from p64.engine.scripting import UserScript
+from p64.engine.scripting import GameScript
 
 
-class Push(UserScript):
+class Push(GameScript):
     def on_update(self, dt):
         if self.entity_physics is None:
             return
@@ -132,10 +144,10 @@ Add a `CharacterController` component to the same entity, then call
 
 ```python
 from p64.engine.math import Vec3
-from p64.engine.scripting import UserScript
+from p64.engine.scripting import GameScript
 
 
-class PlayerController(UserScript):
+class PlayerController(GameScript):
     speed = 5.0
 
     def on_update(self, dt):
@@ -156,16 +168,35 @@ class PlayerController(UserScript):
 
 `move_character` returns the collision-adjusted motion as a `Vec3`.
 
+## Audio Playback
+
+Add an `AudioSource` component to the same entity, assign an imported WAV
+AudioClip, then call `play`, `stop`, `pause`, or `resume`.
+
+```python
+from p64.engine.scripting import GameScript
+
+
+class Footstep(GameScript):
+    def on_update(self, dt):
+        if self.audio_source and self.input.was_key_pressed("space"):
+            self.audio_source.play()
+```
+
+WAV files under `assets/` are automatically imported as AudioClips. Runtime
+copies are mono, 16-bit WAV files with a maximum sample rate of 22050 Hz.
+Spatial playback is handled by the runtime relative to the active camera.
+
 ## Scene Switching
 
 Use `self.scene_manager.load_scene_by_name` to queue a scene switch. The switch is
 applied after the current script tick.
 
 ```python
-from p64.engine.scripting import UserScript
+from p64.engine.scripting import GameScript
 
 
-class Door(UserScript):
+class Door(GameScript):
     target_scene = "second"
     spawn_id = "door_exit"
 
@@ -183,10 +214,10 @@ Persistent entities are carried into the next scene. This is useful for players,
 inventory managers, and global state objects.
 
 ```python
-from p64.engine.scripting import UserScript
+from p64.engine.scripting import GameScript
 
 
-class PlayerPersistence(UserScript):
+class PlayerPersistence(GameScript):
     def on_start(self):
         self.persistent()
 ```

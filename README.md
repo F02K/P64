@@ -8,20 +8,28 @@ custom `.shader` files, and Windows desktop builds through PyInstaller.
 
 - P64 Hub project manager for creating, adding, opening, removing, and deleting projects.
 - Native project folders with `assets/`, `packages/`, and `build/`.
+- Automatic VSCode setup for new projects, plus manual refresh through the editor
+  Project menu or `python -m p64 vscode <project>`.
 - Project manifests use `project.p64`.
 - Scene files use `.scenep64`.
 - Generated asset metadata files use `.mdp64`.
 - Runtime material files use `.material`; editor-only material defaults and usage
   caches live in hidden `.material.mdp64` sidecars.
 - Scenes and scripts live under `assets/scenes/` and `assets/scripts/`.
+- New gameplay scripts inherit from `GameScript`; generated project constants for
+  VSCode/Pylance live in `packages/P64Generated/python/p64_project_api.py`.
 - Builtin engine assets live under `packages/P64Builtin/`.
 - Generated builtin shaders and build-runtime support files are refreshed when a
   project is opened, so older projects pick up engine updates automatically.
 - Scene graph with entities, parenting, transforms, cameras, lights, fog volumes,
   mesh renderers, and Python script components.
-- OBJ/MTL import with groups, Source Materials, UVs, normals, optional vertex
-  colors, texture metadata, diffuse material tinting, material extraction, and
-  submesh hierarchy support.
+- OBJ/MTL model import with internal mesh entries, Source Materials, UVs,
+  normals, optional vertex colors, texture metadata, diffuse material tinting,
+  material extraction, and reusable `.mdp64` bounds/wireframe data for previews
+  and gizmos.
+- Automatic WAV AudioClip import with generated mono, 16-bit, max-22050 Hz
+  runtime audio under `packages/P64Generated/audio/`, plus AudioSource playback
+  and simple camera-based spatial panning.
 - Scene/Game viewport tabs, scene camera navigation, hierarchy selection, shared
   entity/asset inspector, asset tree, and console.
 - Asset browser file operations for user-owned `assets/`: create folders, create
@@ -69,6 +77,12 @@ python -m p64 run samples\FirstScene
 python -m p64 validate samples\FirstScene
 ```
 
+Refresh VSCode support files for an existing project:
+
+```powershell
+python -m p64 vscode samples\FirstScene
+```
+
 The batch launcher opens the Hub by default:
 
 ```powershell
@@ -88,6 +102,11 @@ input, movement, physics, scene switching, and persistent objects.
 
 ```text
 MyGame/
+  .vscode/
+    settings.json
+    tasks.json
+    extensions.json
+    launch.json
   project.p64
   assets/
     scenes/
@@ -96,12 +115,19 @@ MyGame/
       spin.py
     model.obj
     model.obj.mdp64
+    beep.wav
+    beep.wav.mdp64
     materials/
       model/
         Mat.material
     shaders/
       custom_textured.shader
   packages/
+    P64Generated/
+      python/
+        p64_project_api.py
+      audio/
+        audio_beep.wav
     P64Builtin/
       shaders/
         standard_vertex_lit.shader
@@ -117,15 +143,28 @@ Generated P64 files are JSON internally, but use P64-native extensions:
 - `.scenep64` files are editable scenes.
 - `.material` files are editable runtime materials.
 - `.mdp64` files are generated metadata and hidden editor/engine sidecars.
+- `.vscode/` and `packages/P64Generated/python/p64_project_api.py` are generated
+  VSCode support files and can be refreshed by P64.
+- `packages/P64Generated/audio/` contains generated mono WAV files for imported
+  AudioClips.
 
 The editor treats `assets/` as the editable project content area. Builtin package
 files under `packages/P64Builtin/` are generated engine-owned support files and
 are refreshed on project load when they are recognizable builtins.
 
-OBJ Source Materials render with MTL defaults and the standard VertexLit shader
-until you extract them into `.material` assets. Extracted materials can change
-shader, textures, and shader properties in the material asset inspector or in the
-selected MeshRenderer's Materials foldout.
+OBJ files are Model assets. Their `.mdp64` sidecars store imported mesh entries,
+per-mesh bounds, material slots, stats, and wireframe data used by previews and
+gizmos. Source Materials render with MTL defaults and the standard VertexLit
+shader until you extract them into `.material` assets. Extracted materials can
+change shader, textures, and shader properties in the material asset inspector or
+in the selected MeshRenderer's Materials foldout.
+
+WAV files under `assets/` are automatically imported as AudioClip assets when the
+editor refreshes assets or when validation/builds run. Their `.mdp64` sidecars
+store original/imported sample rates, duration, sample count, and the generated
+mono runtime WAV path. AudioSource components reference those clips, play them on
+awake if enabled, and use camera-relative distance and panning for 3D spatial
+output.
 
 Legacy files still load and can be migrated:
 
@@ -142,10 +181,10 @@ save, discard, or cancel before switching.
 Scripts can request scene changes:
 
 ```python
-from p64.engine.scripting import UserScript
+from p64.engine.scripting import GameScript
 
 
-class ChangeScene(UserScript):
+class ChangeScene(GameScript):
     def on_update(self, dt):
         self.scene_manager.load_scene_by_name("main")
 ```
@@ -153,7 +192,7 @@ class ChangeScene(UserScript):
 Objects can persist across scene switches:
 
 ```python
-class Player(UserScript):
+class Player(GameScript):
     def on_start(self):
         self.persistent()
 ```

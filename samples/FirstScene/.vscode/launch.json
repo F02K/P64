@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "P64: Run Project",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "p64",
+      "args": [
+        "run",
+        "${workspaceFolder}"
+      ],
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "P64: Open Editor",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "p64",
+      "args": [
+        "editor",
+        "${workspaceFolder}"
+      ],
+      "console": "integratedTerminal"
+    }
+  ]
+}

@@ -5,26 +5,40 @@ import sys
 from pathlib import Path
 from types import ModuleType
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from p64.engine.collision import CollisionWorld
-from p64.engine.components import CharacterController, EntityPhysics, ScriptComponent, ScriptEntry
+from p64.engine.components import AudioSource, CharacterController, EntityPhysics, ScriptComponent, ScriptEntry, Transform
 from p64.engine.input import InputState
 from p64.engine.math import Vec3
+
+if TYPE_CHECKING:
+    from p64.engine.entity import Entity
+    from p64.engine.project import Project
+    from p64.engine.scene import Scene
+    from p64.engine.scene_manager import SceneManager
 
 
 @dataclass
 class ScriptContext:
-    scene: Any
-    project: Any | None = None
-    scene_manager: Any | None = None
+    scene: Scene
+    project: Project | None = None
+    scene_manager: SceneManager | None = None
     time: float = 0.0
     input: InputState = field(default_factory=InputState)
 
 
-class UserScript:
-    entity: Any
-    transform: Any
+class GameScript:
+    entity: Entity
+    transform: Transform
+    scene: Scene | None
+    project: Project | None
+    scene_manager: SceneManager | None
+    input: InputState
+    time: float
+    character_controller: CharacterController | None
+    entity_physics: EntityPhysics | None
+    audio_source: AudioSource | None
 
     def __init__(self, entity: Any, context: ScriptContext | None = None, **properties: Any) -> None:
         self.entity = entity
@@ -36,6 +50,7 @@ class UserScript:
         self.time = context.time if context else 0.0
         self.character_controller = self._find_character_controller()
         self.entity_physics = self._find_entity_physics()
+        self.audio_source = self._find_audio_source()
         if self.character_controller is not None and context is not None:
             self.character_controller.bind_runtime(entity, context.scene, context.project)
         for key, value in properties.items():
@@ -49,6 +64,12 @@ class UserScript:
             return Vec3()
         return CollisionWorld(self.scene, self.project).move_character(self.entity, self.character_controller, motion, dt)
 
+    def on_start(self) -> None:
+        pass
+
+    def on_update(self, dt: float) -> None:
+        pass
+
     def _find_character_controller(self) -> CharacterController | None:
         for component in getattr(self.entity, "components", []):
             if isinstance(component, CharacterController):
@@ -61,10 +82,20 @@ class UserScript:
                 return component
         return None
 
+    def _find_audio_source(self) -> AudioSource | None:
+        for component in getattr(self.entity, "components", []):
+            if isinstance(component, AudioSource):
+                return component
+        return None
+
 
 class ScriptManager:
-    def __init__(self, scripts_dir: Path | list[Path]) -> None:
+    def __init__(self, scripts_dir: Path | list[Path], import_dirs: Path | list[Path] | None = None) -> None:
         self.scripts_dirs = scripts_dir if isinstance(scripts_dir, list) else [scripts_dir]
+        if import_dirs is None:
+            self.import_dirs = []
+        else:
+            self.import_dirs = import_dirs if isinstance(import_dirs, list) else [import_dirs]
         self._modules: dict[str, ModuleType] = {}
 
     def instantiate(
@@ -115,7 +146,8 @@ class ScriptManager:
         if spec is None or spec.loader is None:
             return None, f"Could not create import spec for {script_path}"
         module = importlib.util.module_from_spec(spec)
-        module.UserScript = UserScript
+        module.GameScript = GameScript
+        self._ensure_script_import_paths()
         try:
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
@@ -138,6 +170,12 @@ class ScriptManager:
             if path.exists():
                 return path
         return None
+
+    def _ensure_script_import_paths(self) -> None:
+        for folder in reversed([*self.scripts_dirs, *self.import_dirs]):
+            text = str(folder.resolve())
+            if text not in sys.path:
+                sys.path.insert(0, text)
 
 
 def _script_candidate(folder: Path, script: str) -> Path:

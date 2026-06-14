@@ -5,6 +5,11 @@ folders.
 
 ```text
 MyGame/
+  .vscode/
+    settings.json
+    tasks.json
+    extensions.json
+    launch.json
   project.p64
   assets/
     scenes/
@@ -18,7 +23,14 @@ MyGame/
         Mat.material
     model.obj
     model.obj.mdp64
+    beep.wav
+    beep.wav.mdp64
   packages/
+    P64Generated/
+      python/
+        p64_project_api.py
+      audio/
+        audio_beep.wav
     P64Builtin/
       shaders/
         standard_vertex_lit.shader
@@ -36,6 +48,7 @@ MyGame/
 - `.material` files store editable runtime material data.
 - `.mdp64` files store generated asset metadata and editor-only sidecar data.
 - `.shader` files store custom shader source.
+- `.vscode/` stores generated VSCode workspace support files.
 
 ## Editable Content
 
@@ -55,16 +68,25 @@ contains build pipeline support and a copied runtime/editor source tree used by
 desktop builds.
 
 When a project is opened, P64 refreshes generated builtin shaders and build
-support files if they are recognizable generated files. User-authored files under
-`assets/` are not overwritten by this refresh.
+support files if they are recognizable generated files. New projects also receive
+VSCode support files and `packages/P64Generated/python/p64_project_api.py`.
+Imported WAV runtime copies are generated automatically under
+`packages/P64Generated/audio/` when the editor refreshes assets or
+validation/builds run.
+Re-run `Project > Setup VSCode` or `python -m p64 vscode <project>` to refresh
+those files for an existing project. User-authored files under `assets/` are not
+overwritten by this refresh.
 
 ## Metadata Sidecars
 
-`.mdp64` files are hidden editor/engine sidecars. OBJ sidecars store imported
-groups, source material names, MTL defaults, and material extraction mappings.
-Material sidecars such as `Mat.material.mdp64` store reset defaults, source links,
-and usage cache information. Scenes and `.material` files remain the authoritative
-runtime data.
+`.mdp64` files are hidden editor/engine sidecars. OBJ sidecars describe the OBJ
+as a Model asset: imported mesh entries, source material names, per-mesh bounds,
+triangle/vertex stats, wireframe edge data for previews and gizmos, MTL defaults,
+and material extraction mappings. Material sidecars such as
+`Mat.material.mdp64` store reset defaults, source links, and usage cache
+information. WAV sidecars describe AudioClip import settings, original and
+runtime sample rates, duration, sample count, and the generated mono WAV path.
+Scenes and `.material` files remain the authoritative runtime data.
 
 ## Legacy Files
 

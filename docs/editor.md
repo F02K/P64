@@ -15,6 +15,19 @@ The inspector edits the selected entity or asset. Entity inspectors expose
 transforms, object type, active/persistent flags, and component-specific fields.
 Asset inspectors show file metadata, previews for images, shader summaries, and
 context actions such as open, reveal, import, and material extraction.
+OBJ files are shown as Model assets: selecting one shows model details, imported
+mesh entries, material counts, bounds, and a wireframe preview generated from the
+`.mdp64` sidecar.
+WAV files are shown as AudioClip assets: selecting one shows original/imported
+sample information, duration, generated runtime path, and a refresh action.
+
+## Project Menu
+
+The Project menu saves the current scene, opens project/build settings, and can
+refresh VSCode support through `Setup VSCode`. That action writes `.vscode`
+settings, tasks, extension recommendations, launch configs, and the generated
+`packages/P64Generated/python/p64_project_api.py` autocomplete helper without
+overwriting unrelated VSCode entries.
 
 ## Asset Browser
 
@@ -32,7 +45,10 @@ Inside `assets/`, the asset browser can:
 - delete files and folders after confirmation
 - create specialized scenes, shaders, and scripts
 - import OBJ assets into the current scene
-- open scene, shader, and Python files
+- inspect OBJ Model assets without instantiating them
+- refresh WAV AudioClip imports
+- open scene and shader files
+- open Python scripts in VSCode with the full project workspace
 
 Metadata sidecars (`.mdp64`) are internal editor files and are hidden from the
 asset browser.
@@ -55,14 +71,23 @@ in the asset browser. Folders outside `assets/` are allowed after a warning, but
 those external materials are referenced by absolute path and are not managed by
 the asset browser.
 
-MeshRenderer inspectors show Source Materials as information and show editable
-P64 material slots in a `Materials` foldout near the bottom of the inspector. If
-a slot has no `.material` asset, it renders with MTL defaults and the standard
-VertexLit shader. If a slot references a `.material`, its shader and properties
-can be edited there.
+MeshRenderer inspectors reference a concrete mesh entry inside an imported Model.
+They show Source Materials as information and show editable P64 material slots in
+a `Materials` foldout near the bottom of the inspector. If a slot has no
+`.material` asset, it renders with MTL defaults and the standard VertexLit shader.
+If a slot references a `.material`, its shader and properties can be edited there.
 
 Selecting a `.material` asset also shows the same shader, texture, and property
 fields. Reset restores values from the hidden `.material.mdp64` defaults.
+
+## Audio
+
+AudioSource components play WAV AudioClips. WAV files under `assets/` are
+imported automatically when the editor refreshes assets. The importer converts
+clips to mono, 16-bit PCM, with a maximum sample rate of 22050 Hz, then writes
+the runtime copy under `packages/P64Generated/audio/`. Spatial AudioSources stay
+mono as assets and are panned/attenuated at runtime relative to the active
+camera. The manual refresh action forces a reimport of a selected WAV.
 
 ## Scene And Game Tabs
 

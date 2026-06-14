@@ -7,6 +7,7 @@ from typing import Any
 
 from p64.editor.ops import (
     add_component,
+    import_audio_asset,
     extract_materials_for_obj,
     move_component as move_component_in_entity,
     move_script_entry as move_script_entry_in_component,
@@ -16,9 +17,10 @@ from p64.editor.ops import (
 from p64.editor.panels.assets import is_preview_image
 from p64.editor.panels.inspector import missing_reference_summary
 from p64.editor.utils.ui import make_widget_compact
-from p64.engine.assets import AssetMetadata, discover_metadata
+from p64.engine.assets import AssetMetadata, discover_metadata, model_meshes, resolve_model_mesh
+from p64.engine.audio import audio_info
 from p64.engine.collision import apply_mesh_primitive_defaults
-from p64.engine.components import Camera, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, ScriptEntry, SpawnPoint
+from p64.engine.components import AudioSource, Camera, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, ScriptEntry, SpawnPoint
 from p64.engine.entity import ENTITY, GAME_OBJECT, Entity, set_object_type_recursive
 from p64.engine.files import is_metadata_file
 from p64.engine.files import find_metadata_for_source
@@ -30,6 +32,7 @@ from p64.engine.validation import entity_reference_errors
 
 AVAILABLE_COMPONENTS = (
     "MeshRenderer",
+    "AudioSource",
     "Camera",
     "Light",
     "Fog",
@@ -43,11 +46,13 @@ AVAILABLE_COMPONENTS = (
 
 def component_summary(component: object) -> str:
     if isinstance(component, MeshRenderer):
-        return f"MeshRenderer: {component.mesh} / {component.submesh or '*'}"
+        return f"MeshRenderer: {component.mesh}"
     if isinstance(component, Camera):
         return f"Camera: fov={component.fov} active={component.active}"
     if isinstance(component, Light):
         return f"Light: {component.kind} intensity={component.intensity}"
+    if isinstance(component, AudioSource):
+        return f"AudioSource: {component.clip}"
     if isinstance(component, Fog):
         return f"Fog: near={component.near} far={component.far}"
     return type(component).__name__
@@ -96,6 +101,8 @@ def create_inspector_mixin(
         def _add_component_from_menu(self, component_name: str) -> None:
             if component_name == "MeshRenderer":
                 self._add_mesh_renderer()
+            elif component_name == "AudioSource":
+                self._add_audio_source()
             elif component_name == "Fog":
                 self._add_fog()
             elif component_name == "ScriptComponent":
@@ -130,6 +137,8 @@ def create_inspector_mixin(
                     self._add_camera_editor(component)
                 elif isinstance(component, Light):
                     self._add_light_editor(component)
+                elif isinstance(component, AudioSource):
+                    self._add_audio_source_editor(component)
                 elif isinstance(component, SpawnPoint):
                     self._add_spawn_point_editor(component)
                 elif isinstance(component, Collider):
@@ -170,6 +179,10 @@ def create_inspector_mixin(
                 import_button = QPushButton("Import", action_widget)
                 import_button.clicked.connect(lambda: self._import_asset_obj(path))
                 actions.addWidget(import_button)
+            if path.suffix.lower() == ".wav":
+                refresh_audio = QPushButton("Refresh Audio", action_widget)
+                refresh_audio.clicked.connect(lambda: self._refresh_audio_asset(path))
+                actions.addWidget(refresh_audio)
             self.inspector_layout.addWidget(action_widget)
 
             if is_preview_image(path):
@@ -208,6 +221,8 @@ def create_inspector_mixin(
                     self.inspector_layout.addWidget(QLabel(f"Shader parse error: {exc}", self.inspector))
             elif path.suffix.lower() == ".obj":
                 self._add_obj_asset_inspector(path)
+            elif path.suffix.lower() == ".wav":
+                self._add_audio_asset_inspector(path)
             elif is_material_file(path):
                 self._add_material_asset_inspector(path)
             self.inspector_layout.addStretch(1)
@@ -301,24 +316,22 @@ def create_inspector_mixin(
             visible.setChecked(component.visible)
             visible.toggled.connect(lambda checked: self._set_mesh_visible(component, checked))
 
-            mesh_combo = self._search_combo([label for label, _metadata in self._mesh_choices()])
-            mesh_id_to_label = {metadata.id: label for label, metadata in self._mesh_choices()}
-            label_to_metadata = dict(self._mesh_choices())
+            mesh_choices = self._mesh_choice_items()
+            mesh_combo = self._search_combo([label for label, _metadata, _mesh_entry in mesh_choices])
+            mesh_id_to_label = {str(mesh_entry.get("id") or metadata.id): label for label, metadata, mesh_entry in mesh_choices}
+            label_to_choice = {label: (metadata, mesh_entry) for label, metadata, mesh_entry in mesh_choices}
             mesh_combo.setCurrentText(mesh_id_to_label.get(component.mesh, component.mesh))
-            submesh_combo = QComboBox(content)
             material_combo = QComboBox(content)
             material_combo.setEditable(True)
-            self._populate_mesh_dependent_combos(component, submesh_combo, material_combo)
+            self._populate_mesh_dependent_combos(component, material_combo)
 
             mesh_combo.currentTextChanged.connect(
-                lambda text: self._set_mesh_from_label(component, text, label_to_metadata, submesh_combo, material_combo)
+                lambda text: self._set_mesh_from_label(component, text, label_to_choice, material_combo)
             )
-            submesh_combo.currentTextChanged.connect(lambda text: self._set_mesh_submesh(component, text))
             material_combo.currentTextChanged.connect(lambda text: self._set_mesh_material(component, text))
 
             form.addRow("Visible", visible)
             form.addRow("Mesh", mesh_combo)
-            form.addRow("Submesh", submesh_combo)
             form.addRow("OBJ Material", material_combo)
             source_materials = self._source_materials_for_component(component)
             source_label = QLabel(", ".join(source_materials) or "None", content)
@@ -350,8 +363,10 @@ def create_inspector_mixin(
                 return
             material_defs = metadata.settings.get("material_defs", {})
             material_assets = metadata.settings.get("material_assets", {})
+            meshes = model_meshes(metadata)
             form = QFormLayout()
-            form.addRow("Groups", QLabel(", ".join(metadata.groups) or "None", self.inspector))
+            form.addRow("Model Source", QLabel(metadata.source, self.inspector))
+            form.addRow("Meshes", QLabel(str(len(meshes) or len(metadata.groups)), self.inspector))
             form.addRow("Materials", QLabel(", ".join(metadata.materials) or "None", self.inspector))
             extracted = sum(1 for name in metadata.materials if isinstance(material_assets, dict) and material_assets.get(name))
             form.addRow("Extracted", QLabel(f"{extracted}/{len(metadata.materials)}", self.inspector))
@@ -367,6 +382,87 @@ def create_inspector_mixin(
             extract.clicked.connect(lambda: self._extract_materials(path))
             form.addRow("Materials", extract)
             box = QGroupBox("OBJ Import", self.inspector)
+            box.setLayout(form)
+            self.inspector_layout.addWidget(box)
+            if meshes:
+                mesh_box = QGroupBox("Model Meshes", self.inspector)
+                mesh_layout = QVBoxLayout(mesh_box)
+                for mesh in meshes:
+                    bounds = mesh.get("bounds", {})
+                    material_slots = mesh.get("material_slots", [])
+                    label = QLabel(
+                        f"{mesh.get('node_path', mesh.get('name', 'Mesh'))} | "
+                        f"{mesh.get('triangle_count', 0)} tris | "
+                        f"{len(material_slots) if isinstance(material_slots, list) else 0} material(s) | "
+                        f"bounds {bounds.get('min', '?')} -> {bounds.get('max', '?') if isinstance(bounds, dict) else '?'}",
+                        mesh_box,
+                    )
+                    label.setWordWrap(True)
+                    mesh_layout.addWidget(label)
+                self.inspector_layout.addWidget(mesh_box)
+                preview = self._model_wireframe_preview(meshes)
+                if preview is not None:
+                    self.inspector_layout.addWidget(preview)
+
+        def _model_wireframe_preview(self, meshes: list[dict[str, Any]]) -> Any | None:
+            try:
+                from PySide6.QtGui import QColor, QPainter, QPen
+            except Exception:
+                return None
+            points: list[tuple[float, float, float]] = []
+            for mesh in meshes:
+                wireframe = mesh.get("wireframe", {})
+                values = wireframe.get("vertices", []) if isinstance(wireframe, dict) else []
+                if not isinstance(values, list):
+                    continue
+                for index in range(0, len(values) - 2, 3):
+                    points.append((float(values[index]), float(values[index + 1]), float(values[index + 2])))
+            if len(points) < 2:
+                return None
+            min_x = min(point[0] for point in points)
+            max_x = max(point[0] for point in points)
+            min_y = min(point[1] for point in points)
+            max_y = max(point[1] for point in points)
+            width, height = 220, 150
+            scale = min((width - 24) / max(max_x - min_x, 0.001), (height - 24) / max(max_y - min_y, 0.001))
+
+            def project(point: tuple[float, float, float]) -> tuple[int, int]:
+                x = 12 + (point[0] - min_x) * scale
+                y = height - (12 + (point[1] - min_y) * scale)
+                return int(x), int(y)
+
+            pixmap = QPixmap(width, height)
+            pixmap.fill(QColor(28, 31, 36))
+            painter = QPainter(pixmap)
+            painter.setPen(QPen(QColor(120, 190, 255), 1))
+            for index in range(0, len(points) - 1, 2):
+                start = project(points[index])
+                end = project(points[index + 1])
+                painter.drawLine(start[0], start[1], end[0], end[1])
+            painter.end()
+            label = QLabel(self.inspector)
+            label.setAlignment(Qt.AlignCenter)
+            label.setPixmap(pixmap)
+            return label
+
+        def _add_audio_asset_inspector(self, path: Path) -> None:
+            metadata_path = find_metadata_for_source(path)
+            form = QFormLayout()
+            if metadata_path and metadata_path.exists():
+                try:
+                    metadata = AssetMetadata.load(metadata_path)
+                    info = audio_info(metadata) or {}
+                    form.addRow("Clip ID", QLabel(metadata.id, self.inspector))
+                    form.addRow("Original", QLabel(f"{info.get('original_channels', '?')} ch @ {info.get('original_sample_rate', '?')} Hz", self.inspector))
+                    form.addRow("Imported", QLabel(f"mono @ {info.get('imported_sample_rate', '?')} Hz", self.inspector))
+                    form.addRow("Duration", QLabel(f"{float(info.get('duration', 0.0)):.2f}s", self.inspector))
+                    form.addRow("Samples", QLabel(str(info.get("sample_count", "?")), self.inspector))
+                    form.addRow("Generated", QLabel(str(info.get("generated_path", "")), self.inspector))
+                except Exception as exc:
+                    form.addRow("Audio", QLabel(f"Metadata error: {exc}", self.inspector))
+            else:
+                form.addRow("Audio", QLabel("Not imported", self.inspector))
+            box = QGroupBox("AudioClip", self.inspector)
             box.setLayout(form)
             self.inspector_layout.addWidget(box)
 
@@ -524,6 +620,45 @@ def create_inspector_mixin(
                 spot_angle.editingFinished.connect(lambda: self._apply_float(spot_angle, component, "spot_angle"))
                 form.addRow("Spot Angle", spot_angle)
             self.inspector_layout.addWidget(self._component_panel(component, "Light", content))
+
+        def _add_audio_source_editor(self, component: AudioSource) -> None:
+            content, form = self._component_content_widget()
+            clip_choices = self._audio_clip_choices()
+            labels = ["None"] + [label for label, _metadata in clip_choices]
+            label_by_id = {metadata.id: label for label, metadata in clip_choices}
+            label_to_id = {label: metadata.id for label, metadata in clip_choices}
+            clip = self._search_combo(labels)
+            clip.setCurrentText(label_by_id.get(component.clip, component.clip or "None"))
+            clip.currentTextChanged.connect(lambda text: self._set_audio_clip(component, text, label_to_id))
+            loop = QCheckBox(content)
+            loop.setChecked(component.loop)
+            loop.toggled.connect(lambda checked: self._set_audio_bool(component, "loop", checked))
+            play_on_awake = QCheckBox(content)
+            play_on_awake.setChecked(component.play_on_awake)
+            play_on_awake.toggled.connect(lambda checked: self._set_audio_bool(component, "play_on_awake", checked))
+            spatial = QCheckBox(content)
+            spatial.setChecked(component.spatial)
+            spatial.toggled.connect(lambda checked: self._set_audio_bool(component, "spatial", checked))
+            volume = QLineEdit(str(component.volume), content)
+            pitch = QLineEdit(str(component.pitch), content)
+            min_distance = QLineEdit(str(component.min_distance), content)
+            max_distance = QLineEdit(str(component.max_distance), content)
+            for edit, attr in [
+                (volume, "volume"),
+                (pitch, "pitch"),
+                (min_distance, "min_distance"),
+                (max_distance, "max_distance"),
+            ]:
+                edit.editingFinished.connect(lambda edit=edit, attr=attr: self._apply_float(edit, component, attr))
+            form.addRow("Clip", clip)
+            form.addRow("Volume", volume)
+            form.addRow("Pitch", pitch)
+            form.addRow("Loop", loop)
+            form.addRow("Play On Awake", play_on_awake)
+            form.addRow("Spatial", spatial)
+            form.addRow("Min Distance", min_distance)
+            form.addRow("Max Distance", max_distance)
+            self.inspector_layout.addWidget(self._component_panel(component, "AudioSource", content))
 
         def _add_spawn_point_editor(self, component: SpawnPoint) -> None:
             content, form = self._component_content_widget()
@@ -873,6 +1008,8 @@ def create_inspector_mixin(
                 replacement = Camera()
             elif isinstance(component, Light):
                 replacement = Light()
+            elif isinstance(component, AudioSource):
+                replacement = AudioSource()
             elif isinstance(component, Fog):
                 replacement = Fog()
             elif isinstance(component, ScriptComponent):
@@ -991,6 +1128,11 @@ def create_inspector_mixin(
             self._mark_dirty()
             self.viewport.update()
 
+        def _set_audio_bool(self, component: AudioSource, name: str, checked: bool) -> None:
+            setattr(component, name, checked)
+            self._mark_dirty()
+            self.viewport.update()
+
         def _vec3_editor(self, vec: Vec3) -> Any:
             row = QHBoxLayout()
             widget = QWidget(self.inspector)
@@ -1031,13 +1173,14 @@ def create_inspector_mixin(
         def _add_mesh_renderer(self) -> None:
             if not self.selected:
                 return
-            choices = self._mesh_choices()
+            choices = self._mesh_choice_items()
             component = MeshRenderer()
             if choices:
-                _label, metadata = choices[0]
-                component.mesh = metadata.id
-                component.submesh = metadata.groups[0] if metadata.groups else None
-                component.material = metadata.materials[0] if metadata.materials else None
+                _label, metadata, mesh_entry = choices[0]
+                component.mesh = str(mesh_entry.get("id") or metadata.id)
+                component.submesh = None
+                source_materials = [str(item) for item in mesh_entry.get("material_slots", [])]
+                component.material = source_materials[0] if source_materials else None
                 self._sync_mesh_materials(component, metadata)
             self.selected.add_component(component)
             self._mark_dirty()
@@ -1050,6 +1193,19 @@ def create_inspector_mixin(
                 self._mark_dirty()
                 self._populate_inspector()
                 self.viewport.update()
+
+        def _add_audio_source(self) -> None:
+            if not self.selected:
+                return
+            component = AudioSource()
+            choices = self._audio_clip_choices()
+            if choices:
+                _label, metadata = choices[0]
+                component.clip = metadata.id
+            self.selected.add_component(component)
+            self._mark_dirty()
+            self._populate_inspector()
+            self.viewport.reload_assets()
 
         def _add_script_component(self) -> None:
             if not self.selected:
@@ -1114,7 +1270,11 @@ def create_inspector_mixin(
         def _script_files(self) -> list[str]:
             if not self.project or not self.project.scripts_dir.exists():
                 return []
-            return sorted(path.relative_to(self.project.scripts_dir).as_posix() for path in self.project.scripts_dir.rglob("*.py"))
+            return sorted(
+                path.relative_to(self.project.scripts_dir).as_posix()
+                for path in self.project.scripts_dir.rglob("*.py")
+                if path.name != "p64_project_api.py"
+            )
 
         def _scene_files(self) -> list[str]:
             if not self.project:
@@ -1141,9 +1301,9 @@ def create_inspector_mixin(
             for node in ast.walk(tree):
                 if isinstance(node, ast.ClassDef):
                     for base in node.bases:
-                        if isinstance(base, ast.Name) and base.id == "UserScript":
+                        if isinstance(base, ast.Name) and base.id == "GameScript":
                             classes.append(node.name)
-                        elif isinstance(base, ast.Attribute) and base.attr == "UserScript":
+                        elif isinstance(base, ast.Attribute) and base.attr == "GameScript":
                             classes.append(node.name)
             return sorted(classes)
 
@@ -1160,6 +1320,18 @@ def create_inspector_mixin(
                     choices.append((f"{metadata.id}  ({metadata.source})", metadata))
             return choices
 
+        def _mesh_choice_items(self) -> list[tuple[str, AssetMetadata, dict[str, Any]]]:
+            choices: list[tuple[str, AssetMetadata, dict[str, Any]]] = []
+            for label, metadata in self._mesh_choices():
+                meshes = model_meshes(metadata)
+                if not meshes:
+                    for group in metadata.groups:
+                        choices.append((f"{group}  ({metadata.source})", metadata, {"id": metadata.id, "name": group, "legacy_submesh": group, "material_slots": list(metadata.materials)}))
+                    continue
+                for mesh in meshes:
+                    choices.append((f"{mesh.get('node_path', mesh.get('name', 'Mesh'))}  ({metadata.source})", metadata, mesh))
+            return choices
+
         def _search_combo(self, items: list[str]) -> Any:
             combo = QComboBox(self.inspector)
             combo.setEditable(True)
@@ -1171,14 +1343,21 @@ def create_inspector_mixin(
             return combo
 
         def _metadata_for_mesh(self, mesh_id: str) -> AssetMetadata | None:
-            for _label, metadata in self._mesh_choices():
-                if metadata.id == mesh_id:
-                    return metadata
-            return None
+            metadata_by_id = {metadata.id: metadata for _label, metadata in self._mesh_choices()}
+            metadata, _mesh = resolve_model_mesh(metadata_by_id, mesh_id)
+            return metadata
+
+        def _mesh_entry_for_component(self, component: MeshRenderer) -> dict[str, Any] | None:
+            metadata_by_id = {metadata.id: metadata for _label, metadata in self._mesh_choices()}
+            _metadata, mesh = resolve_model_mesh(metadata_by_id, component.mesh, component.submesh)
+            return mesh
 
         def _source_materials_for_component(self, component: MeshRenderer) -> list[str]:
             if component.source_materials:
                 return list(component.source_materials)
+            mesh_entry = self._mesh_entry_for_component(component)
+            if mesh_entry:
+                return [str(item) for item in mesh_entry.get("material_slots", [])]
             metadata = self._metadata_for_mesh(component.mesh)
             if metadata:
                 return list(metadata.materials)
@@ -1186,7 +1365,8 @@ def create_inspector_mixin(
 
         def _sync_mesh_materials(self, component: MeshRenderer, metadata: AssetMetadata | None = None) -> None:
             metadata = metadata or self._metadata_for_mesh(component.mesh)
-            component.source_materials = list(metadata.materials) if metadata else []
+            mesh_entry = self._mesh_entry_for_component(component)
+            component.source_materials = [str(item) for item in mesh_entry.get("material_slots", [])] if mesh_entry else (list(metadata.materials) if metadata else [])
             material_assets = metadata.settings.get("material_assets", {}) if metadata else {}
             slots: list[str | None] = []
             for index, material in enumerate(component.source_materials):
@@ -1195,44 +1375,36 @@ def create_inspector_mixin(
                 slots.append(existing or (str(mapped) if mapped else None))
             component.material_slots = slots
 
-        def _populate_mesh_dependent_combos(self, component: MeshRenderer, submesh_combo: Any, material_combo: Any) -> None:
+        def _populate_mesh_dependent_combos(self, component: MeshRenderer, material_combo: Any) -> None:
             metadata = self._metadata_for_mesh(component.mesh)
-            submesh_combo.blockSignals(True)
             material_combo.blockSignals(True)
-            submesh_combo.clear()
             material_combo.clear()
-            submesh_combo.addItems(metadata.groups if metadata else [])
-            material_combo.addItems(metadata.materials if metadata else [])
-            if component.submesh and (metadata is None or component.submesh not in metadata.groups):
-                submesh_combo.addItem(component.submesh)
+            source_materials = self._source_materials_for_component(component)
+            material_combo.addItems(source_materials)
             if component.material and (metadata is None or component.material not in metadata.materials):
                 material_combo.addItem(component.material)
-            submesh_combo.setCurrentText(component.submesh or "")
             material_combo.setCurrentText(component.material or "")
-            submesh_combo.blockSignals(False)
             material_combo.blockSignals(False)
 
         def _set_mesh_from_label(
             self,
             component: MeshRenderer,
             label: str,
-            label_to_metadata: dict[str, AssetMetadata],
-            submesh_combo: Any,
+            label_to_choice: dict[str, tuple[AssetMetadata, dict[str, Any]]],
             material_combo: Any,
         ) -> None:
-            metadata = label_to_metadata.get(label)
-            if metadata is None:
-                for _label, item in self._mesh_choices():
-                    if item.id == label:
-                        metadata = item
-                        break
-            if metadata is None:
+            choice = label_to_choice.get(label)
+            if choice is None:
+                choice = next(((metadata, mesh) for _label, metadata, mesh in self._mesh_choice_items() if mesh.get("id") == label), None)
+            if choice is None:
                 return
-            component.mesh = metadata.id
-            component.submesh = metadata.groups[0] if metadata.groups else None
-            component.material = metadata.materials[0] if metadata.materials else None
+            metadata, mesh_entry = choice
+            component.mesh = str(mesh_entry.get("id") or metadata.id)
+            component.submesh = mesh_entry.get("legacy_submesh")
+            source_materials = [str(item) for item in mesh_entry.get("material_slots", [])]
+            component.material = source_materials[0] if source_materials else None
             self._sync_mesh_materials(component, metadata)
-            self._populate_mesh_dependent_combos(component, submesh_combo, material_combo)
+            self._populate_mesh_dependent_combos(component, material_combo)
             self._mark_dirty()
             self.viewport.reload_assets()
 
@@ -1246,6 +1418,11 @@ def create_inspector_mixin(
             metadata = self._metadata_for_mesh(component.mesh)
             if metadata and not component.source_materials:
                 self._sync_mesh_materials(component, metadata)
+            self._mark_dirty()
+            self.viewport.reload_assets()
+
+        def _set_audio_clip(self, component: AudioSource, label: str, label_to_id: dict[str, str]) -> None:
+            component.clip = "" if label == "None" else label_to_id.get(label, label)
             self._mark_dirty()
             self.viewport.reload_assets()
 
@@ -1321,6 +1498,17 @@ def create_inspector_mixin(
             except Exception as exc:
                 self._log(f"Extract materials failed: {exc}")
 
+        def _refresh_audio_asset(self, path: Path) -> None:
+            if not self.project:
+                return
+            try:
+                metadata = import_audio_asset(self.project, path)
+                self._refresh_assets_from_watcher()
+                self._populate_inspector()
+                self._log(f"Imported audio clip: {metadata.id}")
+            except Exception as exc:
+                self._log(f"Audio import failed: {exc}")
+
         def _material_extract_start_folder(self, path: Path) -> Path:
             if not self.project:
                 return path.parent
@@ -1371,6 +1559,22 @@ def create_inspector_mixin(
                 choices.append((f"{path.stem}  ({material_id})", material_id))
             return sorted(choices)
 
+        def _audio_clip_choices(self) -> list[tuple[str, AssetMetadata]]:
+            if not self.project or not self.project.assets_dir.exists():
+                return []
+            choices: list[tuple[str, AssetMetadata]] = []
+            for metadata_path in discover_metadata(self.project.assets_dir):
+                try:
+                    metadata = AssetMetadata.load(metadata_path)
+                except Exception:
+                    continue
+                if metadata.kind != "audio_clip":
+                    continue
+                info = audio_info(metadata) or {}
+                label = f"{Path(metadata.source).stem}  ({metadata.id}, {info.get('imported_sample_rate', '?')} Hz)"
+                choices.append((label, metadata))
+            return sorted(choices, key=lambda item: item[0].lower())
+
         def _texture_summary(self, component: MeshRenderer) -> str:
             texture = self._texture_path_for(component)
             return str(texture.relative_to(self.project.root)) if texture and self.project else "No diffuse texture"
@@ -1402,7 +1606,7 @@ def create_inspector_mixin(
                 return "No SceneObject"
             for component in self.selected.components:
                 if isinstance(component, MeshRenderer) and component.mesh:
-                    return f"{component.mesh} / {component.submesh or '*'}"
+                    return component.mesh
             return "No MeshRenderer"
 
     return InspectorMixin

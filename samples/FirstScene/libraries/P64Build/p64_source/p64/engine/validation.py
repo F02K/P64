@@ -3,8 +3,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from p64.engine.assets import AssetMetadata, discover_metadata
-from p64.engine.components import CharacterController, Collider, EntityPhysics, MeshRenderer, ScriptComponent
+from p64.engine.assets import AssetMetadata, discover_metadata, resolve_model_mesh
+from p64.engine.audio import audio_info, resolve_audio_clip
+from p64.engine.components import AudioSource, CharacterController, Collider, EntityPhysics, MeshRenderer, ScriptComponent
 from p64.engine.entity import Entity
 from p64.engine.material import resolve_material_reference
 from p64.engine.project import Project
@@ -41,13 +42,14 @@ def entity_reference_errors(project: Project, entity: Entity, metadata: dict[str
     for component in entity.components:
         if isinstance(component, MeshRenderer):
             if component.mesh:
-                mesh = metadata.get(component.mesh)
+                mesh, mesh_entry = resolve_model_mesh(metadata, component.mesh, component.submesh)
                 if mesh is None:
                     errors.append(f"Missing mesh asset: {component.mesh}")
                 else:
-                    if component.submesh and component.submesh not in mesh.groups:
+                    if component.submesh and mesh_entry is None:
                         errors.append(f"Missing submesh: {component.submesh}")
-                    if component.material and component.material not in mesh.materials:
+                    material_slots = mesh_entry.get("material_slots", []) if mesh_entry else mesh.materials
+                    if component.material and component.material not in material_slots and component.material not in mesh.materials:
                         errors.append(f"Missing material: {component.material}")
             if component.shader and not (project.root / component.shader).exists():
                 errors.append(f"Missing shader: {component.shader}")
@@ -69,6 +71,26 @@ def entity_reference_errors(project: Project, entity: Entity, metadata: dict[str
                     errors.append(f"Missing script class: {entry.class_name}")
                 elif not entry.class_name:
                     errors.append("Script entry has no class name")
+        if isinstance(component, AudioSource):
+            if component.clip:
+                if Path(component.clip).suffix and Path(component.clip).suffix.lower() != ".wav":
+                    errors.append(f"Unsupported audio format: {component.clip}")
+                audio = resolve_audio_clip(metadata, component.clip)
+                if audio is None or audio.kind != "audio_clip":
+                    errors.append(f"Missing audio clip: {component.clip}")
+                else:
+                    info = audio_info(audio)
+                    generated = info.get("generated_path") if info else None
+                    if not generated:
+                        errors.append(f"Audio clip has no generated WAV: {component.clip}")
+                    elif not (project.root / str(generated)).exists():
+                        errors.append(f"Missing generated audio: {generated}")
+            if component.volume < 0:
+                errors.append("AudioSource volume must be non-negative")
+            if component.pitch <= 0:
+                errors.append("AudioSource pitch must be positive")
+            if component.min_distance < 0 or component.max_distance <= component.min_distance:
+                errors.append("AudioSource distances must be valid")
         if isinstance(component, Collider):
             if component.shape not in {"box", "sphere", "mesh"}:
                 errors.append(f"Invalid collider shape: {component.shape}")
@@ -82,7 +104,7 @@ def entity_reference_errors(project: Project, entity: Entity, metadata: dict[str
                 renderer = _mesh_renderer(entity)
                 if renderer is None or not renderer.mesh:
                     errors.append("Mesh collider needs a MeshRenderer")
-                elif renderer.mesh not in metadata:
+                elif resolve_model_mesh(metadata, renderer.mesh, renderer.submesh)[0] is None:
                     errors.append(f"Missing mesh asset: {renderer.mesh}")
         if isinstance(component, CharacterController):
             if component.height <= 0 or component.radius <= 0:
@@ -124,8 +146,8 @@ def _script_classes(path: Path) -> set[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
             for base in node.bases:
-                if isinstance(base, ast.Name) and base.id == "UserScript":
+                if isinstance(base, ast.Name) and base.id == "GameScript":
                     classes.add(node.name)
-                elif isinstance(base, ast.Attribute) and base.attr == "UserScript":
+                elif isinstance(base, ast.Attribute) and base.attr == "GameScript":
                     classes.add(node.name)
     return classes

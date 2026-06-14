@@ -12,8 +12,10 @@ from p64.editor.ops import (
     create_script_template,
     create_shader_template,
     delete_asset_path,
+    import_audio_asset,
     insert_obj_scene_entity,
     is_project_startup_scene,
+    open_script_in_vscode_project,
     rename_asset_path,
     update_startup_scene_after_asset_rename,
 )
@@ -161,6 +163,8 @@ def create_asset_browser_mixin(
                 menu.addSeparator()
             if path and path.suffix.lower() == ".obj":
                 menu.addAction("Import OBJ into Scene", lambda: self._import_asset_obj(path))
+            if path and path.suffix.lower() == ".wav":
+                menu.addAction("Refresh Audio Import", lambda: self._refresh_audio_asset(path))
             if path and is_scene_file(path):
                 menu.addAction("Open Scene", lambda: self._open_scene_asset(path))
                 menu.addAction("Set As Startup Scene", lambda: self._set_startup_scene(path))
@@ -199,7 +203,10 @@ def create_asset_browser_mixin(
                 self._populate_asset_grid()
                 return
             if path.suffix.lower() == ".obj":
-                self._import_asset_obj(path)
+                self.selected_asset = path
+                self.selected = None
+                self._populate_inspector()
+                self._update_viewport_status()
             elif is_scene_file(path):
                 self._open_scene_asset(path)
             elif path.suffix.lower() in {".shader", ".py"}:
@@ -370,6 +377,17 @@ def create_asset_browser_mixin(
             except Exception as exc:
                 self._log(f"Import failed: {exc}")
 
+        def _refresh_audio_asset(self, path: Path) -> None:
+            if not self.project:
+                return
+            try:
+                metadata = import_audio_asset(self.project, path)
+                self._refresh_assets_from_watcher()
+                self._populate_inspector()
+                self._log(f"Imported audio clip: {metadata.id}")
+            except Exception as exc:
+                self._log(f"Audio import failed: {exc}")
+
         def _create_shader_asset(self) -> None:
             if not self.project:
                 return
@@ -432,6 +450,15 @@ def create_asset_browser_mixin(
                 QMessageBox.critical(self, "Startup scene failed", str(exc))
 
         def _open_path(self, path: Path) -> None:
+            if self.project and path.suffix.lower() == ".py":
+                message = open_script_in_vscode_project(
+                    self.project,
+                    path,
+                    lambda folder: QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve()))),
+                )
+                if message:
+                    self._log(message)
+                return
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
 
         def _reveal_path(self, path: Path) -> None:

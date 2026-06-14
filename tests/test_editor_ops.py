@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 import unittest
 
 from p64.build.pipeline import validate_project
@@ -18,6 +19,7 @@ from p64.editor.ops import (
     insert_obj_scene_entity,
     move_component,
     move_script_entry,
+    open_script_in_vscode_project,
     rename_asset_path,
     reset_material_asset,
     update_startup_scene_after_asset_rename,
@@ -87,7 +89,42 @@ class EditorOpsTests(unittest.TestCase):
             shader = create_shader_template(root / "assets")
             script = create_script_template(root / "scripts", "Mover")
             self.assertIn("Vertex", shader.read_text(encoding="utf-8"))
-            self.assertIn("class Mover", script.read_text(encoding="utf-8"))
+            script_text = script.read_text(encoding="utf-8")
+            self.assertIn("from p64.engine.scripting import GameScript", script_text)
+            self.assertIn("class Mover(GameScript)", script_text)
+            self.assertIn("def on_update(self, dt: float) -> None", script_text)
+
+    def test_open_script_in_vscode_project_opens_workspace_and_file(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            script = project.scripts_dir / "move.py"
+            script.write_text("", encoding="utf-8")
+
+            with (
+                mock.patch("p64.editor.ops.shutil.which", return_value="code"),
+                mock.patch("p64.editor.ops.subprocess.Popen") as popen,
+            ):
+                message = open_script_in_vscode_project(project, script)
+
+            self.assertIsNone(message)
+            command = popen.call_args.args[0]
+            self.assertEqual(command[:2], ["code", "-r"])
+            self.assertEqual(command[2], str(project.root.resolve()))
+            self.assertEqual(command[3], "--goto")
+            self.assertEqual(command[4], f"{script.resolve()}:1:1")
+
+    def test_open_script_in_vscode_project_falls_back_to_project_folder(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            script = project.scripts_dir / "move.py"
+            script.write_text("", encoding="utf-8")
+            opened: list[Path] = []
+
+            with mock.patch("p64.editor.ops.shutil.which", return_value=None):
+                message = open_script_in_vscode_project(project, script, opened.append)
+
+            self.assertIn("code", message or "")
+            self.assertEqual(opened, [project.root])
 
     def test_asset_file_operations_create_unique_folder_and_file_under_assets(self):
         with TemporaryDirectory() as tmp:

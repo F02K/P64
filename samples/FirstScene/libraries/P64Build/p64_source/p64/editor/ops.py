@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import subprocess
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
-from p64.engine.assets import AssetMetadata
+from p64.engine.audio import import_audio_clip
+from p64.engine.assets import AssetMetadata, model_meshes
 from p64.engine.collision import apply_mesh_primitive_defaults
-from p64.engine.components import Camera, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, SpawnPoint
+from p64.engine.components import AudioSource, Camera, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, SpawnPoint
 from p64.engine.entity import ENTITY, GAME_OBJECT, Entity
 from p64.engine.files import find_metadata_for_source, is_metadata_file, iter_metadata_files, metadata_path_for_source
 from p64.engine.material import (
@@ -19,7 +22,7 @@ from p64.engine.material import (
     save_material_metadata,
     resolve_material_reference,
 )
-from p64.engine.obj import import_obj_to_project, parse_obj
+from p64.engine.obj import import_obj_to_project
 from p64.engine.project import Project
 from p64.engine.scene import Scene
 
@@ -80,18 +83,18 @@ def insert_obj_scene_entity(project: Project, scene: Scene, obj_or_metadata: Pat
             metadata = import_obj_to_project(project, obj_or_metadata, add_to_startup_scene=False)
         obj_path = project.root / metadata.source
 
-    mesh = parse_obj(obj_path)
     root = Entity(obj_path.stem, object_type=GAME_OBJECT)
-    for group in mesh.groups:
-        child = Entity(group.name, object_type=GAME_OBJECT)
-        material = group.faces[0].material if group.faces else None
+    for mesh_entry in _mesh_entries_for_metadata(metadata):
+        child = Entity(str(mesh_entry.get("name") or "Mesh"), object_type=GAME_OBJECT)
+        source_materials = [str(item) for item in mesh_entry.get("material_slots", [])]
+        material = source_materials[0] if source_materials else None
         child.add_component(
             MeshRenderer(
-                mesh=metadata.id,
-                submesh=group.name,
+                mesh=str(mesh_entry.get("id") or ""),
+                submesh=mesh_entry.get("legacy_submesh"),
                 material=material,
-                source_materials=_source_materials_for(metadata),
-                material_slots=_material_slots_for(metadata),
+                source_materials=source_materials,
+                material_slots=_material_slots_for(metadata, source_materials),
             )
         )
         root.add_child(child)
@@ -102,18 +105,19 @@ def insert_obj_scene_entity(project: Project, scene: Scene, obj_or_metadata: Pat
 def split_mesh_renderer_into_children(entity: Entity, metadata: AssetMetadata) -> list[Entity]:
     existing = {child.name for child in entity.children}
     created: list[Entity] = []
-    for group in metadata.groups:
-        if group in existing:
+    for mesh_entry in _mesh_entries_for_metadata(metadata):
+        name = str(mesh_entry.get("name") or "Mesh")
+        if name in existing:
             continue
-        child = Entity(group, object_type=GAME_OBJECT)
-        material = metadata.materials[0] if metadata.materials else None
+        source_materials = [str(item) for item in mesh_entry.get("material_slots", [])]
+        material = source_materials[0] if source_materials else None
         child.add_component(
             MeshRenderer(
-                mesh=metadata.id,
-                submesh=group,
+                mesh=str(mesh_entry.get("id") or ""),
+                submesh=mesh_entry.get("legacy_submesh"),
                 material=material,
-                source_materials=_source_materials_for(metadata),
-                material_slots=_material_slots_for(metadata),
+                source_materials=source_materials,
+                material_slots=_material_slots_for(metadata, source_materials),
             )
         )
         entity.add_child(child)
@@ -156,6 +160,10 @@ def extract_materials_for_obj(project: Project, obj_or_metadata: Path, output_di
 
 def reset_material_asset(project: Project, material_path: Path) -> None:
     reset_material_from_metadata(project.root, material_path)
+
+
+def import_audio_asset(project: Project, path: Path) -> AssetMetadata:
+    return import_audio_clip(project, path)
 
 
 def update_material_usage_cache(project: Project, scene: Scene, scene_path: Path | None = None) -> None:
@@ -313,15 +321,31 @@ def create_script_template(scripts_dir: Path, class_name: str = "NewScript") -> 
     scripts_dir.mkdir(parents=True, exist_ok=True)
     path = _unique_path(scripts_dir / f"{class_name.lower()}.py")
     path.write_text(
-        "from p64.engine.scripting import UserScript\n\n\n"
-        f"class {class_name}(UserScript):\n"
-        "    def on_start(self):\n"
+        "from p64.engine.scripting import GameScript\n\n\n"
+        f"class {class_name}(GameScript):\n"
+        "    def on_start(self) -> None:\n"
         "        pass\n\n"
-        "    def on_update(self, dt):\n"
+        "    def on_update(self, dt: float) -> None:\n"
         "        pass\n",
         encoding="utf-8",
     )
     return path
+
+
+def open_script_in_vscode_project(project: Project, script_path: Path, fallback_open: Callable[[Path], None] | None = None) -> str | None:
+    code_command = shutil.which("code") or shutil.which("code.cmd")
+    if code_command:
+        subprocess.Popen([
+            code_command,
+            "-r",
+            str(project.root.resolve()),
+            "--goto",
+            f"{script_path.resolve()}:1:1",
+        ])
+        return None
+    if fallback_open is not None:
+        fallback_open(project.root)
+    return "VSCode command 'code' was not found. Opened the project folder instead."
 
 
 def add_component(entity: Entity, component_name: str, project: Project | None = None) -> object:
@@ -331,6 +355,8 @@ def add_component(entity: Entity, component_name: str, project: Project | None =
         return entity.add_component(Camera())
     if component_name == "Light":
         return entity.add_component(Light())
+    if component_name == "AudioSource":
+        return entity.add_component(AudioSource())
     if component_name == "Fog":
         return entity.add_component(Fog())
     if component_name == "ScriptComponent":
@@ -462,8 +488,24 @@ def _source_materials_for(metadata: AssetMetadata) -> list[str]:
     return list(metadata.materials)
 
 
-def _material_slots_for(metadata: AssetMetadata) -> list[str | None]:
-    source_materials = _source_materials_for(metadata)
+def _mesh_entries_for_metadata(metadata: AssetMetadata) -> list[dict[str, object]]:
+    meshes = model_meshes(metadata)
+    if meshes:
+        return meshes
+    return [
+        {
+            "id": metadata.id,
+            "name": group,
+            "source_group": group,
+            "legacy_submesh": group,
+            "material_slots": list(metadata.materials),
+        }
+        for group in metadata.groups
+    ]
+
+
+def _material_slots_for(metadata: AssetMetadata, source_materials: list[str] | None = None) -> list[str | None]:
+    source_materials = source_materials or _source_materials_for(metadata)
     material_assets = metadata.settings.get("material_assets", {})
     slots: list[str | None] = []
     for material in source_materials:

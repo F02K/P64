@@ -38,6 +38,52 @@ class EditorImportTests(unittest.TestCase):
         self.assertIn("mesh_triangles", source)
         self.assertNotIn('if component.shape == "mesh":\n                        self._draw_world_bounds', source)
 
+    def test_obj_double_click_selects_model_asset_instead_of_importing(self):
+        source = Path("src/p64/editor/panels/assets.py").read_text(encoding="utf-8")
+        method = source[source.index("def _asset_double_clicked"):source.index("def _asset_selection_changed")]
+
+        self.assertIn('if path.suffix.lower() == ".obj":', method)
+        self.assertIn("self.selected_asset = path", method)
+        self.assertNotIn("self._import_asset_obj(path)", method)
+
+    def test_model_inspector_exposes_meshes_and_wireframe_preview(self):
+        source = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
+
+        self.assertIn('"Model Meshes"', source)
+        self.assertIn("_model_wireframe_preview", source)
+        self.assertIn('form.addRow("Meshes"', source)
+
+    def test_mesh_renderer_inspector_no_longer_exposes_submesh_row(self):
+        source = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
+        mesh_editor = source[source.index("def _add_mesh_renderer_editor"):source.index("def _add_obj_asset_inspector")]
+
+        self.assertNotIn('form.addRow("Submesh"', mesh_editor)
+        self.assertNotIn("submesh_combo", mesh_editor)
+
+    def test_audio_source_editor_hooks_are_available(self):
+        source = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
+
+        self.assertIn('"AudioSource"', source)
+        self.assertIn("def _add_audio_source_editor", source)
+        self.assertIn("def _audio_clip_choices", source)
+        self.assertIn("def _add_audio_asset_inspector", source)
+
+    def test_wav_asset_browser_exposes_audio_refresh(self):
+        source = Path("src/p64/editor/panels/assets.py").read_text(encoding="utf-8")
+
+        self.assertIn('path.suffix.lower() == ".wav"', source)
+        self.assertIn("Refresh Audio Import", source)
+
+    def test_editor_refresh_auto_imports_audio_before_populating_assets(self):
+        source = Path("src/p64/editor/main_window.py").read_text(encoding="utf-8")
+        refresh_all = source[source.index("def _refresh_all"):source.index("def _refresh_assets_from_watcher")]
+        refresh_assets = source[source.index("def _refresh_assets_from_watcher"):source.index("def _log")]
+
+        self.assertIn("ensure_audio_clips_for_assets", refresh_all)
+        self.assertLess(refresh_all.index("ensure_audio_clips_for_assets"), refresh_all.index("self._populate_assets()"))
+        self.assertIn("ensure_audio_clips_for_assets", refresh_assets)
+        self.assertLess(refresh_assets.index("ensure_audio_clips_for_assets"), refresh_assets.index("self._populate_assets()"))
+
     def test_selection_uses_mesh_outline_not_bounds(self):
         source = Path("src/p64/renderer/scene_renderer.py").read_text(encoding="utf-8")
 

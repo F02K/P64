@@ -50,8 +50,15 @@ render settings. They are not material properties.
 
 ## Materials
 
+OBJ files are imported as Model assets. A Model can contain multiple mesh entries
+from Blender object/group exports, and each mesh can use one or more source
+materials. P64 stores the imported mesh list, bounds, stats, and wireframe data
+in the OBJ `.mdp64` sidecar so previews, picking, collision helpers, and gizmos
+can reuse it.
+
 OBJ files may reference `.mtl` files exported from tools such as Blender. P64
-keeps those MTL values as source defaults. A `MeshRenderer` tracks:
+keeps those MTL values as source defaults. A `MeshRenderer` references one
+concrete mesh entry from a Model and tracks:
 
 - Source Materials: material names found in the OBJ/MTL data
 - Materials: optional `.material` slots assigned by P64

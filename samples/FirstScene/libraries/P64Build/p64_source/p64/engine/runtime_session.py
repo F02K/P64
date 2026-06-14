@@ -6,6 +6,7 @@ from typing import Any
 from p64.engine.project import Project
 from p64.engine.scene import Scene
 from p64.engine.scene_manager import SceneManager
+from p64.engine.audio import AudioSystem
 from p64.engine.collision import CollisionWorld
 from p64.engine.input import InputState
 from p64.engine.scripting import ScriptContext, ScriptManager
@@ -21,8 +22,12 @@ class RuntimeSession:
     def __init__(self, project: Project, scene: Scene | None = None) -> None:
         self.project = project
         self.scene_manager = SceneManager(project, scene)
-        self.script_manager = ScriptManager([project.scripts_dir, project.root / "scripts"])
+        self.script_manager = ScriptManager(
+            [project.scripts_dir, project.root / "scripts"],
+            import_dirs=[project.project_api_dir],
+        )
         self.input = InputState()
+        self.audio = AudioSystem(project)
         self.time = 0.0
         self.errors: list[str] = []
         self._scripts: list[RuntimeScript] = []
@@ -36,7 +41,13 @@ class RuntimeSession:
         if self._started:
             return []
         self._started = True
+        self.audio.start_scene(self.scene)
         return self._instantiate_scene_scripts()
+
+    def stop(self) -> None:
+        self.audio.stop_all()
+        self._scripts = []
+        self._started = False
 
     def tick(self, dt: float) -> list[str]:
         dt = max(0.0, dt)
@@ -57,8 +68,11 @@ class RuntimeSession:
                     except Exception as exc:  # pragma: no cover - exact user code is unknowable
                         errors.append(f"{runtime_script.entry_name}.on_update failed: {exc}")
             if self.scene_manager.apply_queued_scene():
+                self.audio.stop_all()
+                self.audio.start_scene(self.scene)
                 errors.extend(self._instantiate_scene_scripts())
             CollisionWorld(self.scene, self.project).step_physics(dt)
+            self.audio.tick(self.scene, dt)
             self.errors.extend(errors)
             return errors
         finally:

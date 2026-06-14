@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from p64.engine.components import MeshRenderer, ScriptComponent
+from p64.engine.audio import ensure_audio_clips_for_assets
 from p64.engine.assets import AssetMetadata, discover_metadata
 from p64.engine.files import PROJECT_FILE, alternate_scene_path, is_scene_file
 from p64.engine.material import MaterialAsset, load_material_metadata, resolve_material_reference
@@ -37,6 +38,10 @@ def validate_project(project_root: Path) -> BuildReport:
     except Exception as exc:
         report.errors.append(f"Could not load project: {exc}")
         return report
+    try:
+        ensure_audio_clips_for_assets(project)
+    except Exception as exc:
+        report.errors.append(f"Could not import audio clips: {exc}")
 
     scene_path = project.root / project.startup_scene
     if not is_scene_file(scene_path):
