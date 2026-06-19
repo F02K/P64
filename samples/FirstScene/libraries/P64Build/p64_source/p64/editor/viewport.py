@@ -104,7 +104,7 @@ def create_viewport_class(QOpenGLWidget: Any, QWidget: Any, QLabel: Any, QVBoxLa
                     self._draw_gizmo_overlay(selected)
                 except Exception as exc:
                     self.ctx.clear(0.16, 0.18, 0.21, 1.0)
-                    self.logger(f"Render failed: {exc}")
+                    self.logger(f"Render failed: {type(exc).__name__}: {exc!r}")
 
             def reload_assets(self) -> None:
                 if self.renderer:

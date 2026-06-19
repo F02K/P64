@@ -4,6 +4,7 @@ Shader "P64Builtin/Standard Unlit"
     {
         Texture u_texture = ""
         Color u_base_color = (1.0, 1.0, 1.0)
+        Float u_alpha_cutoff = 0.0 Range(0, 1)
     }
 
     Vertex
@@ -44,6 +45,7 @@ Shader "P64Builtin/Standard Unlit"
         uniform int u_texture_filter;
         uniform bool u_dithering_enabled;
         uniform vec3 u_base_color;
+        uniform float u_alpha_cutoff;
         in vec2 v_uv;
         in vec3 v_color;
         in vec3 v_world_pos;
@@ -87,6 +89,9 @@ Shader "P64Builtin/Standard Unlit"
         
         void main() {
             vec4 texel = u_texture_filter == 2 ? sample_three_point(u_texture, v_uv) : texture(u_texture, v_uv);
+            if (texel.a < u_alpha_cutoff) {
+                discard;
+            }
             vec3 quantized = quantize_color(texel.rgb * u_base_color * v_color);
             vec3 half_size = max(u_fog_size * 0.5, vec3(0.001));
             vec3 volume_pos = abs(v_world_pos - u_fog_center) / half_size;

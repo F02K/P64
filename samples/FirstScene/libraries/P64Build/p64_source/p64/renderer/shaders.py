@@ -88,6 +88,7 @@ uniform float u_color_levels;
 uniform int u_texture_filter;
 uniform bool u_dithering_enabled;
 uniform vec3 u_base_color;
+uniform float u_alpha_cutoff;
 in vec2 v_uv;
 in vec3 v_color;
 in vec3 v_light;
@@ -132,6 +133,9 @@ vec3 quantize_color(vec3 color) {
 
 void main() {
     vec4 texel = u_texture_filter == 2 ? sample_three_point(u_texture, v_uv) : texture(u_texture, v_uv);
+    if (texel.a < u_alpha_cutoff) {
+        discard;
+    }
     vec3 lit = texel.rgb * u_base_color * v_color * v_light;
     vec3 quantized = quantize_color(lit);
     vec3 half_size = max(u_fog_size * 0.5, vec3(0.001));
@@ -180,6 +184,7 @@ uniform float u_color_levels;
 uniform int u_texture_filter;
 uniform bool u_dithering_enabled;
 uniform vec3 u_base_color;
+uniform float u_alpha_cutoff;
 in vec2 v_uv;
 in vec3 v_color;
 in vec3 v_world_pos;
@@ -223,6 +228,9 @@ vec3 quantize_color(vec3 color) {
 
 void main() {
     vec4 texel = u_texture_filter == 2 ? sample_three_point(u_texture, v_uv) : texture(u_texture, v_uv);
+    if (texel.a < u_alpha_cutoff) {
+        discard;
+    }
     vec3 quantized = quantize_color(texel.rgb * u_base_color * v_color);
     vec3 half_size = max(u_fog_size * 0.5, vec3(0.001));
     vec3 volume_pos = abs(v_world_pos - u_fog_center) / half_size;
@@ -309,10 +317,15 @@ CLOUD_PLANE_VERTEX_SHADER = """
 in vec3 in_position;
 uniform mat4 u_view;
 uniform mat4 u_projection;
-out vec2 v_world_xz;
+uniform vec3 u_cloud_origin;
+uniform float u_skybox_cloud_height;
+out vec2 v_cloud_uv;
+out float v_dome_height;
 void main() {
-    v_world_xz = in_position.xz;
-    gl_Position = u_projection * u_view * vec4(in_position, 1.0);
+    vec3 world_position = in_position + u_cloud_origin;
+    v_cloud_uv = in_position.xz / max(u_skybox_cloud_height, 1.0);
+    v_dome_height = clamp(in_position.y / max(u_skybox_cloud_height, 1.0), 0.0, 1.0);
+    gl_Position = u_projection * u_view * vec4(world_position, 1.0);
 }
 """
 
@@ -325,7 +338,8 @@ uniform float u_skybox_cloud_height;
 uniform float u_skybox_cloud_softness;
 uniform float u_color_levels;
 uniform bool u_dithering_enabled;
-in vec2 v_world_xz;
+in vec2 v_cloud_uv;
+in float v_dome_height;
 out vec4 fragColor;
 
 float hash21(vec2 p) {
@@ -372,11 +386,14 @@ vec3 quantize_color(vec3 color) {
 }
 
 void main() {
-    vec2 uv = v_world_xz / max(u_skybox_cloud_height, 1.0) * max(u_skybox_cloud_scale, 0.1);
+    vec2 uv = v_cloud_uv * max(u_skybox_cloud_scale, 0.1);
     float noise = fbm(uv);
     float threshold = mix(0.86, 0.34, clamp(u_skybox_cloud_coverage, 0.0, 1.0));
     float softness = max(u_skybox_cloud_softness, 0.001);
     float cloud = smoothstep(threshold, threshold + softness, noise);
+    float horizon_fade = smoothstep(0.08, 0.30, v_dome_height);
+    float zenith_fade = 1.0 - smoothstep(0.88, 1.0, v_dome_height);
+    cloud *= horizon_fade * zenith_fade;
     cloud = floor(cloud * 4.0) / 4.0;
     if (cloud <= 0.001) {
         discard;

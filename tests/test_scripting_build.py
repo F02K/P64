@@ -12,6 +12,7 @@ from p64.build.pipeline import build_executable, build_hub_app, create_runtime_b
 from p64.engine.builtin import STANDARD_SHADER_RELATIVE
 from p64.engine.components import Collider, EntityPhysics, ScriptComponent, ScriptEntry
 from p64.engine.entity import Entity
+from p64.engine.math import Vec3
 from p64.engine.project import Project
 from p64.engine.runtime_session import RuntimeSession
 from p64.engine.scene import Scene
@@ -131,6 +132,30 @@ class ScriptingBuildTests(unittest.TestCase):
             runtime_actor = session.scene.find(actor.id)
             self.assertIsNotNone(runtime_actor)
             self.assertGreater(runtime_actor.transform.position.x, 0.0)
+
+    def test_runtime_session_clamps_physics_dt_but_not_script_dt(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            (project.scripts_dir / "move_by_dt.py").write_text(
+                "from p64.engine.scripting import GameScript\n"
+                "class MoveByDt(GameScript):\n"
+                "    def on_update(self, dt):\n"
+                "        self.transform.position.x += dt\n",
+                encoding="utf-8",
+            )
+            scene = project.load_startup_scene()
+            actor = Entity("Actor")
+            actor.add_component(EntityPhysics(use_gravity=False, velocity=Vec3(10.0, 0.0, 0.0)))
+            actor.add_component(ScriptComponent(scripts=[ScriptEntry(script="move_by_dt.py", class_name="MoveByDt")]))
+            scene.add_entity(actor)
+
+            session = RuntimeSession(project, scene)
+            errors = session.tick(1.0)
+
+            self.assertEqual(errors, [])
+            runtime_actor = session.scene.find(actor.id)
+            self.assertIsNotNone(runtime_actor)
+            self.assertAlmostEqual(runtime_actor.transform.position.x, 1.5)
 
     def test_runtime_session_mutates_scene_copy_only(self):
         with TemporaryDirectory() as tmp:

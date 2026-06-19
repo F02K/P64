@@ -7,8 +7,9 @@ from typing import Iterable
 from p64.engine.assets import AssetMetadata, discover_metadata, resolve_model_mesh
 from p64.engine.components import MeshRenderer
 from p64.engine.entity import Entity
+from p64.engine.files import metadata_path_for_source
 from p64.engine.math import Vec3
-from p64.engine.obj import parse_obj
+from p64.engine.obj import ObjGroup, parse_obj
 from p64.engine.project import Project
 
 Triangle = tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]
@@ -23,6 +24,8 @@ class ConvexHull:
 
 
 _CONVEX_HULL_CACHE: dict[tuple[str, str, str | None], ConvexHull | None] = {}
+_MESH_TRIANGLE_CACHE: dict[tuple[str, str, str | None], list[Triangle]] = {}
+_METADATA_BY_ID_CACHE: dict[str, dict[str, AssetMetadata]] = {}
 _MAX_EXACT_HULL_POINTS = 64
 
 
@@ -48,15 +51,55 @@ def mesh_bounds(project: Project, component: MeshRenderer) -> tuple[Vec3, Vec3] 
 
 
 def mesh_triangles(project: Project, component: MeshRenderer) -> list[Triangle]:
+    key = (str(project.root.resolve()), component.mesh, component.submesh)
+    if key in _MESH_TRIANGLE_CACHE:
+        return _MESH_TRIANGLE_CACHE[key]
     metadata, mesh = resolve_model_mesh(_metadata_by_id(project), component.mesh, component.submesh)
     if metadata is None:
         return []
+    baked = _baked_mesh_triangles(metadata, mesh, component)
+    if baked is not None:
+        _MESH_TRIANGLE_CACHE[key] = baked
+        return baked
     obj_mesh = parse_obj(project.root / metadata.source)
     group_name = str(mesh.get("source_group")) if mesh and mesh.get("source_group") else component.submesh
     group = next((item for item in obj_mesh.groups if item.name == group_name), obj_mesh.groups[0] if obj_mesh.groups else None)
     if group is None:
         return []
-    return [tuple(vertex.position for vertex in face.vertices) for face in group.faces if len(face.vertices) == 3]
+    triangles = [tuple(vertex.position for vertex in face.vertices) for face in group.faces if len(face.vertices) == 3]
+    _MESH_TRIANGLE_CACHE[key] = triangles
+    return triangles
+
+
+def ensure_mesh_collision_metadata(project: Project, component: MeshRenderer) -> None:
+    metadata_by_id = _metadata_by_id(project)
+    metadata, mesh = resolve_model_mesh(metadata_by_id, component.mesh, component.submesh)
+    if metadata is None:
+        return
+    mesh_id = str(mesh.get("id")) if mesh and mesh.get("id") else component.mesh
+    collision = metadata.settings.get("collision")
+    meshes = collision.get("meshes") if isinstance(collision, dict) else None
+    if isinstance(meshes, dict) and mesh_id in meshes:
+        return
+    source = project.root / metadata.source
+    obj_mesh = parse_obj(source)
+    collision_meshes: dict[str, object] = dict(meshes) if isinstance(meshes, dict) else {}
+    for mesh_entry in _model_mesh_entries(metadata):
+        entry_id = str(mesh_entry.get("id") or "")
+        if not entry_id or entry_id in collision_meshes:
+            continue
+        group_name = str(mesh_entry.get("source_group") or mesh_entry.get("name") or "")
+        group = next((item for item in obj_mesh.groups if item.name == group_name), None)
+        if group is None:
+            continue
+        collision_meshes[entry_id] = _collision_entry_for_group(group)
+    metadata.settings["collision"] = {
+        "version": 1,
+        "source_mtime": source.stat().st_mtime if source.exists() else 0.0,
+        "meshes": collision_meshes,
+    }
+    metadata.save(metadata_path_for_source(project.root / metadata.source))
+    clear_mesh_geometry_cache(project)
 
 
 def convex_hull(project: Project, component: MeshRenderer) -> ConvexHull | None:
@@ -69,11 +112,21 @@ def convex_hull(project: Project, component: MeshRenderer) -> ConvexHull | None:
 def clear_convex_hull_cache(project: Project | None = None) -> None:
     if project is None:
         _CONVEX_HULL_CACHE.clear()
+        _MESH_TRIANGLE_CACHE.clear()
+        _METADATA_BY_ID_CACHE.clear()
         return
     prefix = str(project.root.resolve())
     for key in list(_CONVEX_HULL_CACHE):
         if key[0] == prefix:
             _CONVEX_HULL_CACHE.pop(key, None)
+    for key in list(_MESH_TRIANGLE_CACHE):
+        if key[0] == prefix:
+            _MESH_TRIANGLE_CACHE.pop(key, None)
+    _METADATA_BY_ID_CACHE.pop(prefix, None)
+
+
+def clear_mesh_geometry_cache(project: Project | None = None) -> None:
+    clear_convex_hull_cache(project)
 
 
 def build_convex_hull(points: Iterable[tuple[float, float, float] | Vec3]) -> ConvexHull | None:
@@ -171,6 +224,69 @@ def transformed_bounds(entity: Entity, local_bounds: tuple[Vec3, Vec3]) -> tuple
 
 def _mesh_points(project: Project, component: MeshRenderer) -> list[tuple[float, float, float]]:
     return [point for triangle in mesh_triangles(project, component) for point in triangle]
+
+
+def _model_mesh_entries(metadata: AssetMetadata) -> list[dict[str, object]]:
+    model = metadata.settings.get("model")
+    meshes = model.get("meshes", []) if isinstance(model, dict) else []
+    return [item for item in meshes if isinstance(item, dict)]
+
+
+def _collision_entry_for_group(group: ObjGroup) -> dict[str, object]:
+    positions = [vertex.position for face in group.faces for vertex in face.vertices]
+    bounds = {
+        "min": [min(position[index] for position in positions) for index in range(3)] if positions else [0.0, 0.0, 0.0],
+        "max": [max(position[index] for position in positions) for index in range(3)] if positions else [0.0, 0.0, 0.0],
+    }
+    return {
+        "bounds": bounds,
+        "source_group": group.name,
+        "triangles": [
+            [list(vertex.position) for vertex in face.vertices]
+            for face in group.faces
+            if len(face.vertices) == 3
+        ],
+    }
+
+
+def _baked_mesh_triangles(metadata: AssetMetadata, mesh: dict[str, object] | None, component: MeshRenderer) -> list[Triangle] | None:
+    collision = metadata.settings.get("collision")
+    if not isinstance(collision, dict) or int(collision.get("version", 0) or 0) < 1:
+        return None
+    meshes = collision.get("meshes")
+    if not isinstance(meshes, dict):
+        return None
+    mesh_id = str(mesh.get("id")) if mesh and mesh.get("id") else component.mesh
+    entry = meshes.get(mesh_id)
+    if not isinstance(entry, dict) and mesh is not None:
+        source_group = mesh.get("source_group")
+        entry = next(
+            (
+                value for value in meshes.values()
+                if isinstance(value, dict) and value.get("source_group") == source_group
+            ),
+            None,
+        )
+    if not isinstance(entry, dict):
+        return None
+    raw_triangles = entry.get("triangles")
+    if not isinstance(raw_triangles, list):
+        return None
+    triangles: list[Triangle] = []
+    for raw_triangle in raw_triangles:
+        if not isinstance(raw_triangle, list) or len(raw_triangle) != 3:
+            continue
+        points: list[tuple[float, float, float]] = []
+        for raw_point in raw_triangle:
+            if not isinstance(raw_point, list) or len(raw_point) < 3:
+                break
+            try:
+                points.append((float(raw_point[0]), float(raw_point[1]), float(raw_point[2])))
+            except (TypeError, ValueError):
+                break
+        if len(points) == 3:
+            triangles.append((points[0], points[1], points[2]))
+    return triangles
 
 
 def _unique_points(points: Iterable[tuple[float, float, float] | Vec3]) -> list[Vec3]:
@@ -284,6 +400,10 @@ def _normalize_vec(vector: Vec3) -> Vec3:
 
 
 def _metadata_by_id(project: Project) -> dict[str, AssetMetadata]:
+    key = str(project.root.resolve())
+    cached = _METADATA_BY_ID_CACHE.get(key)
+    if cached is not None:
+        return cached
     metadata_by_id: dict[str, AssetMetadata] = {}
     for metadata_path in discover_metadata(project.assets_dir):
         try:
@@ -291,4 +411,5 @@ def _metadata_by_id(project: Project) -> dict[str, AssetMetadata]:
         except Exception:
             continue
         metadata_by_id[metadata.id] = metadata
+    _METADATA_BY_ID_CACHE[key] = metadata_by_id
     return metadata_by_id

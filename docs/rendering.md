@@ -17,6 +17,7 @@ Both builtin shaders declare material-editable properties:
 
 - `u_texture`: main texture slot
 - `u_base_color`: material tint, initialized from MTL `Kd` when available
+- `u_alpha_cutoff`: alpha threshold for texture cutout; `0.0` keeps existing opaque/alpha output behavior
 
 ## Lit Rendering
 
@@ -30,6 +31,7 @@ The standard Lit shader is vertex-lit. It combines:
 - fog
 - color quantization
 - optional screen-space dithering
+- optional alpha cutout from texture alpha
 
 Directional, point, and spot lights are supported, but the look is intentionally
 N64-inspired rather than physically based.
@@ -38,7 +40,7 @@ N64-inspired rather than physically based.
 
 The standard Unlit shader ignores scene light contribution but still applies
 texture color, material tint, optional vertex colors, fog, quantization, and
-dithering.
+dithering. It supports the same alpha cutout property as the Lit shader.
 
 ## Texture Filtering
 

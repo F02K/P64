@@ -19,6 +19,7 @@ LEGACY_STANDARD_SHADER_RELATIVE = f"packages/{BUILTIN_PACKAGE_NAME}/shaders/stan
 BUILTIN_MATERIAL_PROPERTIES = (
     'Texture u_texture = ""',
     "Color u_base_color = (1.0, 1.0, 1.0)",
+    "Float u_alpha_cutoff = 0.0 Range(0, 1)",
 )
 
 

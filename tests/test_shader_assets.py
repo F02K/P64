@@ -75,8 +75,12 @@ class ShaderAssetTests(unittest.TestCase):
                 properties = {prop.name: prop for prop in shader.properties}
                 self.assertIn("u_texture", properties)
                 self.assertIn("u_base_color", properties)
+                self.assertIn("u_alpha_cutoff", properties)
                 self.assertEqual(properties["u_texture"].kind, "texture")
                 self.assertEqual(properties["u_base_color"].default, [1.0, 1.0, 1.0])
+                self.assertEqual(properties["u_alpha_cutoff"].default, 0.0)
+                self.assertEqual(properties["u_alpha_cutoff"].minimum, 0.0)
+                self.assertEqual(properties["u_alpha_cutoff"].maximum, 1.0)
 
     def test_discover_shader_assets_and_ids(self):
         root = Path("samples/FirstScene")
@@ -105,6 +109,12 @@ class ShaderAssetTests(unittest.TestCase):
         self.assertIn("dither_threshold(gl_FragCoord.xy)", STANDARD_UNLIT_FRAGMENT_SHADER)
         self.assertIn("quantize_color(lit)", STANDARD_VERTEX_LIT_FRAGMENT_SHADER)
         self.assertIn("quantize_color(texel.rgb * u_base_color * v_color)", STANDARD_UNLIT_FRAGMENT_SHADER)
+
+    def test_builtin_shaders_use_alpha_cutout(self):
+        for fragment in [STANDARD_VERTEX_LIT_FRAGMENT_SHADER, STANDARD_UNLIT_FRAGMENT_SHADER]:
+            self.assertIn("uniform float u_alpha_cutoff", fragment)
+            self.assertIn("if (texel.a < u_alpha_cutoff)", fragment)
+            self.assertIn("discard", fragment)
 
     def test_no_console_specific_names_outside_readme_or_generated_assets(self):
         forbidden = ("n" + "64").lower()

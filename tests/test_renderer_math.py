@@ -3,6 +3,7 @@ import sys
 import types
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 import unittest
 
 from p64.engine.math import Vec3
@@ -20,6 +21,7 @@ from p64.renderer.scene_renderer import (
     MESH_VERTEX_LAYOUT,
     RenderCamera,
     SceneRenderer,
+    cloud_dome_vertices,
     _convex_collider_wire_vertices,
     _mat4_bytes,
     _mesh_collider_wire_vertices,
@@ -32,7 +34,7 @@ from p64.renderer.scene_renderer import (
     cloud_plane_vertices,
     grid_line_batches,
 )
-from p64.renderer.shaders import CLOUD_PLANE_FRAGMENT_SHADER, SKYBOX_FRAGMENT_SHADER
+from p64.renderer.shaders import CLOUD_PLANE_FRAGMENT_SHADER, CLOUD_PLANE_VERTEX_SHADER, SKYBOX_FRAGMENT_SHADER
 
 
 class RendererMathTests(unittest.TestCase):
@@ -500,6 +502,33 @@ class RendererMathTests(unittest.TestCase):
             self.assertEqual(program.uniforms["u_base_color"].value, (0.8, 0.1, 0.2))
             self.assertEqual(program.uniforms["u_custom_float"].value, 0.6)
 
+    def test_renderer_sets_default_alpha_cutoff_and_material_can_override(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_pick_mesh(project, "target.obj", x_offset=0.0, z=0.0)
+            default_entity = Entity("Default")
+            default_entity.add_component(MeshRenderer(mesh=metadata.id, submesh="Body"))
+            material_path = project.assets_dir / "materials" / "Cutout.material"
+            MaterialAsset(properties={"u_alpha_cutoff": 0.42}).save(material_path)
+            cutout_entity = Entity("Cutout")
+            cutout_entity.add_component(
+                MeshRenderer(
+                    mesh=metadata.id,
+                    submesh="Body",
+                    material="Paint",
+                    source_materials=["Paint"],
+                    material_slots=["assets/materials/Cutout.material"],
+                )
+            )
+            scene = Scene("Test", [default_entity, cutout_entity])
+            renderer = _renderer(project)
+
+            renderer.render(scene, 800, 800, camera=RenderCamera(Vec3(0, 0, 5), Vec3()), show_grid=False)
+
+            self.assertEqual(renderer.program.uniforms["u_alpha_cutoff"].value, 0.0)
+            program = renderer._program_for(next(mesh for mesh in renderer._mesh_cache.values() if mesh.material_properties).shader)
+            self.assertEqual(program.uniforms["u_alpha_cutoff"].value, 0.42)
+
     def test_renderer_splits_model_mesh_into_material_batches(self):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
@@ -563,19 +592,122 @@ class RendererMathTests(unittest.TestCase):
 
             self.assertEqual(calls, [])
 
-    def test_cloud_plane_vertices_follow_camera_xz_above_camera(self):
-        camera = RenderCamera(position=Vec3(10.0, 4.0, -6.0), rotation=Vec3(), far=200.0)
-        vertices = cloud_plane_vertices(camera, 80.0)
+    def test_background_state_failures_do_not_abort_mesh_render(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            entity = Entity("Target")
+            entity.add_component(MeshRenderer(mesh="missing"))
+            scene = Scene("Test", [entity])
+            logs: list[str] = []
+            renderer = _renderer(project, logs.append)
+            renderer.ctx.fail_disable = True
+            renderer.ctx.fail_depth_mask = True
+            renderer.ctx.fail_blend_func = True
+            events: list[str] = []
+            renderer._draw_mesh = lambda *_args: events.append("mesh") or False
 
-        self.assertEqual(len(vertices), 18)
-        self.assertEqual(set(round(value, 4) for value in vertices[1::3]), {84.0})
+            renderer.render(scene, 320, 240, camera=RenderCamera(Vec3(), Vec3()), show_grid=False)
+
+            self.assertEqual(events, ["mesh"])
+            self.assertTrue(any("Background pass begin/depth_mask failed: RuntimeError" in message for message in logs))
+            self.assertTrue(any("Background pass begin/disable_depth failed: RuntimeError" in message for message in logs))
+            self.assertFalse(any(message.startswith("Render failed") for message in logs))
+
+    def test_skybox_vao_failure_logs_stage_and_render_continues(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            entity = Entity("Target")
+            entity.add_component(MeshRenderer(mesh="missing"))
+            scene = Scene("Test", [entity])
+            logs: list[str] = []
+            renderer = _renderer(project, logs.append)
+            events: list[str] = []
+
+            def fail_skybox_vao():
+                raise RuntimeError("sky vao boom")
+
+            renderer._skybox_vertex_array = fail_skybox_vao
+            renderer._draw_cloud_plane = lambda *_args: events.append("cloud")
+            renderer._draw_mesh = lambda *_args: events.append("mesh") or False
+
+            renderer.render(scene, 320, 240, camera=RenderCamera(Vec3(), Vec3()), show_grid=False)
+
+            self.assertEqual(events, ["cloud", "mesh"])
+            self.assertTrue(any("Skybox render failed during vao: RuntimeError: RuntimeError('sky vao boom')" in message for message in logs))
+
+    def test_cloud_failures_log_stage_without_raising(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            logs: list[str] = []
+            renderer = _renderer(project, logs.append)
+            camera = RenderCamera(position=Vec3(0.0, 4.0, 0.0), rotation=Vec3(), far=200.0)
+            view = _view_matrix(camera)
+            projection = _perspective_matrix(60, 1.0, 0.1, 200.0)
+
+            def fail_cloud_vao(_camera: RenderCamera, _height: float):
+                raise RuntimeError("cloud vao boom")
+
+            renderer._cloud_plane_vertex_array = fail_cloud_vao
+
+            renderer._draw_cloud_plane(camera, view, projection, {"skybox_cloud_height": 80.0})
+
+            self.assertTrue(any("Cloud plane render failed during vao: RuntimeError: RuntimeError('cloud vao boom')" in message for message in logs))
+
+    def test_cloud_plane_vertices_form_camera_centered_dome(self):
+        camera = RenderCamera(position=Vec3(10.0, 4.0, -6.0), rotation=Vec3(), far=200.0)
+        vertices = cloud_plane_vertices(camera, 80.0, segments=12)
+
+        self.assertEqual(len(vertices), 12 * 12 * 3)
+        self.assertGreater(len(set(round(value, 4) for value in vertices[1::3])), 2)
         self.assertAlmostEqual((min(vertices[0::3]) + max(vertices[0::3])) / 2.0, 10.0)
         self.assertAlmostEqual((min(vertices[2::3]) + max(vertices[2::3])) / 2.0, -6.0)
+        self.assertGreater(max(vertices[1::3]), 4.0 + 79.0)
+        self.assertLess(min(vertices[1::3]), 4.0 + 20.0)
+
+    def test_cloud_dome_vertices_are_local_for_cached_camera_follow(self):
+        vertices = cloud_dome_vertices(80.0, 640.0, segments=12)
+
+        self.assertEqual(len(vertices), 12 * 12 * 3)
+        self.assertAlmostEqual((min(vertices[0::3]) + max(vertices[0::3])) / 2.0, 0.0, delta=0.001)
+        self.assertAlmostEqual((min(vertices[2::3]) + max(vertices[2::3])) / 2.0, 0.0, delta=0.001)
+        self.assertGreater(len(set(round(value, 4) for value in vertices[1::3])), 2)
+
+    def test_cloud_plane_draw_reuses_cached_geometry(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            renderer = _renderer(project)
+            camera = RenderCamera(position=Vec3(0.0, 4.0, 0.0), rotation=Vec3(), far=200.0)
+            view = _view_matrix(camera)
+            projection = _perspective_matrix(60, 1.0, 0.1, 200.0)
+            settings = {
+                "skybox_cloud_color": [1.0, 0.96, 0.86],
+                "skybox_cloud_coverage": 0.45,
+                "skybox_cloud_scale": 3.0,
+                "skybox_cloud_height": 80.0,
+                "skybox_cloud_softness": 0.08,
+                "color_levels": 32,
+                "dithering": True,
+            }
+
+            renderer._draw_cloud_plane(camera, view, projection, settings)
+            first_buffer_count = renderer.ctx.buffer_count
+            first_vertex_array_count = renderer.ctx.vertex_array_count
+            camera.position.x = 20.0
+            renderer._draw_cloud_plane(camera, view, projection, settings)
+
+            self.assertEqual(renderer.ctx.buffer_count, first_buffer_count)
+            self.assertEqual(renderer.ctx.vertex_array_count, first_vertex_array_count)
+            self.assertIsNotNone(renderer.cloud_plane_vao)
+            renderer.reload_assets()
+            self.assertIsNone(renderer.cloud_plane_vao)
 
     def test_skybox_gradient_and_cloud_plane_shader_are_split(self):
         self.assertNotIn("value_noise", SKYBOX_FRAGMENT_SHADER)
         self.assertIn("value_noise", CLOUD_PLANE_FRAGMENT_SHADER)
         self.assertIn("fbm", CLOUD_PLANE_FRAGMENT_SHADER)
+        self.assertIn("u_cloud_origin", CLOUD_PLANE_VERTEX_SHADER)
+        self.assertIn("v_dome_height", CLOUD_PLANE_FRAGMENT_SHADER)
+        self.assertIn("horizon_fade", CLOUD_PLANE_FRAGMENT_SHADER)
         self.assertIn("u_skybox_cloud_height", CLOUD_PLANE_FRAGMENT_SHADER)
         self.assertIn("u_skybox_cloud_softness", CLOUD_PLANE_FRAGMENT_SHADER)
         self.assertIn("u_color_levels", CLOUD_PLANE_FRAGMENT_SHADER)
@@ -599,7 +731,9 @@ class RendererMathTests(unittest.TestCase):
             self.assertEqual(len(outline_vaos), 1)
             self.assertEqual(outline_vaos[0].render_count, 2)
             self.assertTrue(any(mesh.outline_vao is not None for mesh in renderer._mesh_cache.values()))
-            renderer.reload_assets()
+            with mock.patch("p64.renderer.scene_renderer.clear_mesh_geometry_cache") as clear_cache:
+                renderer.reload_assets()
+            clear_cache.assert_called_once_with(project)
             self.assertEqual(renderer._mesh_cache, {})
 
 
@@ -612,7 +746,32 @@ class FakeContext:
         self.enabled: list[object] = []
         self.disabled: list[object] = []
         self.cull_face = "back"
-        self.depth_mask = True
+        self.fail_enable = False
+        self.fail_disable = False
+        self.fail_depth_mask = False
+        self.fail_blend_func = False
+        self._depth_mask = True
+        self._blend_func = None
+
+    @property
+    def depth_mask(self):
+        return self._depth_mask
+
+    @depth_mask.setter
+    def depth_mask(self, value):
+        if self.fail_depth_mask:
+            raise RuntimeError("depth_mask boom")
+        self._depth_mask = value
+
+    @property
+    def blend_func(self):
+        return self._blend_func
+
+    @blend_func.setter
+    def blend_func(self, value):
+        if self.fail_blend_func:
+            raise RuntimeError("blend_func boom")
+        self._blend_func = value
 
     def program(self, vertex_shader: str, fragment_shader: str):
         self.calls += 1
@@ -646,9 +805,13 @@ class FakeContext:
         pass
 
     def enable(self, flag: object) -> None:
+        if self.fail_enable:
+            raise RuntimeError("enable boom")
         self.enabled.append(flag)
 
     def disable(self, flag: object) -> None:
+        if self.fail_disable:
+            raise RuntimeError("disable boom")
         self.disabled.append(flag)
 
 
@@ -703,7 +866,15 @@ class FakeVao:
 
 def _renderer(project: Project, log: object | None = None) -> SceneRenderer:
     previous = sys.modules.get("moderngl")
-    sys.modules["moderngl"] = types.SimpleNamespace(DEPTH_TEST=1, LINES=1, NEAREST=1, CULL_FACE=2)
+    sys.modules["moderngl"] = types.SimpleNamespace(
+        DEPTH_TEST=1,
+        LINES=1,
+        NEAREST=1,
+        CULL_FACE=2,
+        BLEND=3,
+        SRC_ALPHA=4,
+        ONE_MINUS_SRC_ALPHA=5,
+    )
     try:
         return SceneRenderer(FakeContext(), project, log)
     finally:

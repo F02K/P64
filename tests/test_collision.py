@@ -1,15 +1,21 @@
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from math import cos, sin
+from unittest import mock
 import unittest
 
+import p64.engine.collision as collision
+import p64.engine.mesh_geometry as mesh_geometry
+from p64.engine.assets import AssetMetadata
 from p64.engine.collision import CollisionWorld, apply_mesh_primitive_defaults, collider_bounds, collider_sphere
 from p64.engine.components import CharacterController, Collider, EntityPhysics, MeshRenderer, ScriptComponent, ScriptEntry, component_from_dict
 from p64.engine.entity import GAME_OBJECT, Entity
-from p64.engine.mesh_geometry import convex_hull, mesh_triangles
+from p64.engine.files import find_metadata_for_source
+from p64.engine.mesh_geometry import clear_mesh_geometry_cache, convex_hull, mesh_triangles
 from p64.engine.obj import import_obj_to_project
 from p64.engine.math import Vec3
 from p64.engine.project import Project
+from p64.engine.runtime_session import RuntimeSession
 from p64.engine.scene import Scene
 
 
@@ -86,6 +92,27 @@ class CollisionTests(unittest.TestCase):
 
             self.assertEqual(errors, [])
             self.assertEqual(player.transform.position.x, 0.25)
+
+    def test_runtime_binds_character_controller_to_reused_collision_world(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            (project.scripts_dir / "idle.py").write_text(
+                "from p64.engine.scripting import GameScript\n"
+                "class Idle(GameScript):\n"
+                "    pass\n",
+                encoding="utf-8",
+            )
+            player = Entity("Player")
+            controller = CharacterController(gravity=0.0)
+            player.add_component(controller)
+            player.add_component(ScriptComponent(scripts=[ScriptEntry(script="idle.py", class_name="Idle")]))
+            scene = Scene("Test", [player])
+
+            session = RuntimeSession(project, scene)
+            errors = session.start()
+
+            self.assertEqual(errors, [])
+            self.assertIs(controller._runtime_collision_world, session.collision_world)
 
     def test_mesh_fit_box_and_sphere_use_mesh_bounds(self):
         with TemporaryDirectory() as tmp:
@@ -194,6 +221,72 @@ class CollisionTests(unittest.TestCase):
             self.assertEqual([hit.entity.name for hit in convex_hits], ["Convex"])
             self.assertEqual(non_convex_hits, [])
 
+    def test_obj_import_does_not_bake_collision_without_mesh_collider(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_test_mesh(project)
+
+            reloaded = AssetMetadata.load(find_metadata_for_source(project.root / metadata.source))
+
+            self.assertNotIn("collision", reloaded.settings)
+
+    def test_static_world_ignores_objects_without_enabled_colliders(self):
+        static = Entity("Static", object_type=GAME_OBJECT)
+        static.add_component(Collider(enabled=False))
+        plain = Entity("Plain", object_type=GAME_OBJECT)
+        scene = Scene("Test", [static, plain])
+
+        world = CollisionWorld(scene)
+
+        self.assertEqual(world.static_colliders, [])
+
+    def test_primitive_static_colliders_do_not_bake_mesh_collision_data(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_test_mesh(project)
+            static = Entity("Static", object_type=GAME_OBJECT)
+            static.add_component(MeshRenderer(mesh=metadata.id, submesh="Body"))
+            static.add_component(Collider(shape="box"))
+            actor = Entity("Actor")
+            actor_collider = Collider(size=Vec3(0.2, 0.2, 0.2))
+            actor.add_component(actor_collider)
+            scene = Scene("Test", [actor, static])
+
+            hits = CollisionWorld(scene, project).overlaps(actor, actor_collider)
+            reloaded = AssetMetadata.load(find_metadata_for_source(project.root / metadata.source))
+
+            self.assertEqual([hit.entity.name for hit in hits], ["Static"])
+            self.assertNotIn("collision", reloaded.settings)
+
+    def test_mesh_collider_bakes_and_reuses_mdp64_collision_data(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_floor_mesh(project)
+            floor = Entity("Floor", object_type=GAME_OBJECT)
+            floor.add_component(MeshRenderer(mesh=metadata.id, submesh="Body"))
+            floor.add_component(Collider(shape="mesh"))
+            actor = Entity("Actor")
+            actor_collider = Collider(size=Vec3(0.2, 0.2, 0.2))
+            actor.add_component(actor_collider)
+            scene = Scene("Test", [actor, floor])
+
+            hits = CollisionWorld(scene, project).overlaps(actor, actor_collider)
+            reloaded = AssetMetadata.load(find_metadata_for_source(project.root / metadata.source))
+
+            self.assertEqual({hit.entity.name for hit in hits}, {"Floor"})
+            collision_data = reloaded.settings.get("collision", {})
+            self.assertEqual(collision_data.get("version"), 1)
+            baked_meshes = collision_data.get("meshes", {})
+            self.assertIn(metadata.settings["model"]["meshes"][0]["id"], baked_meshes)
+            self.assertGreater(len(next(iter(baked_meshes.values()))["triangles"]), 0)
+
+            clear_mesh_geometry_cache(project)
+            with mock.patch("p64.engine.mesh_geometry.parse_obj") as parse:
+                triangles = mesh_triangles(project, MeshRenderer(mesh=metadata.id, submesh="Body"))
+
+            self.assertGreater(len(triangles), 0)
+            parse.assert_not_called()
+
     def test_character_controller_blocks_against_static_mesh_collider(self):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
@@ -276,6 +369,41 @@ class CollisionTests(unittest.TestCase):
         self.assertEqual(frozen.transform.position.to_list(), [0.0, 2.0, 0.0])
         self.assertEqual(frozen_physics.velocity.to_list(), [0.0, 2.0, 0.0])
 
+    def test_step_physics_skips_collision_cache_without_enabled_physics(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_test_mesh(project)
+            actor = Entity("Actor")
+            actor.add_component(MeshRenderer(mesh=metadata.id, submesh="Body"))
+            actor.add_component(Collider(shape="mesh", convex=True))
+            actor.add_component(EntityPhysics(enabled=False, use_gravity=False))
+            world = CollisionWorld(Scene("Test", [actor]), project)
+
+            with mock.patch("p64.engine.collision.collider_bounds", wraps=collision.collider_bounds) as bounds:
+                world.step_physics(1.0)
+
+            self.assertEqual(bounds.call_count, 0)
+            self.assertEqual(world.dynamic_colliders, [])
+
+    def test_step_physics_skips_collision_cache_for_only_kinematic_physics(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_test_mesh(project)
+            actor = Entity("Actor")
+            actor.add_component(MeshRenderer(mesh=metadata.id, submesh="Body"))
+            actor.add_component(Collider(shape="mesh", convex=True))
+            physics = EntityPhysics(is_kinematic=True, use_gravity=False)
+            physics.add_force(Vec3(5.0, 0.0, 0.0))
+            actor.add_component(physics)
+            world = CollisionWorld(Scene("Test", [actor]), project)
+
+            with mock.patch("p64.engine.collision.collider_bounds", wraps=collision.collider_bounds) as bounds:
+                world.step_physics(1.0)
+
+            self.assertEqual(bounds.call_count, 0)
+            self.assertEqual(actor.transform.position.to_list(), [0.0, 0.0, 0.0])
+            self.assertEqual(physics._force.to_list(), [0.0, 0.0, 0.0])
+
     def test_entity_physics_angular_velocity_and_torque_rotate_body(self):
         actor = Entity("Actor")
         physics = EntityPhysics(use_gravity=False, angular_velocity=Vec3(0.0, 5.0, 0.0), freeze_rotation=Vec3(1, 0, 0))
@@ -302,6 +430,155 @@ class CollisionTests(unittest.TestCase):
 
         self.assertEqual(actor.transform.position.x, 0.0)
         self.assertEqual(physics.velocity.x, 0.0)
+
+    def test_entity_physics_uses_child_collider_as_body_shape(self):
+        actor = Entity("Actor")
+        physics = EntityPhysics(use_gravity=False, velocity=Vec3(2.0, 0.0, 0.0))
+        actor.add_component(physics)
+        child = actor.add_child(Entity("Body"))
+        child.add_component(Collider(size=Vec3(1, 1, 1)))
+        wall = Entity("Wall", object_type=GAME_OBJECT)
+        wall.transform.position = Vec3(1.0, 0.0, 0.0)
+        wall.add_component(Collider(size=Vec3(1, 2, 2)))
+        scene = Scene("Test", [actor, wall])
+
+        CollisionWorld(scene).step_physics(1.0)
+
+        self.assertEqual(actor.transform.position.x, 0.0)
+        self.assertEqual(physics.velocity.x, 0.0)
+
+    def test_entity_physics_checks_all_child_colliders(self):
+        actor = Entity("Actor")
+        physics = EntityPhysics(use_gravity=False, velocity=Vec3(2.0, 0.0, 0.0))
+        actor.add_component(physics)
+        rear = actor.add_child(Entity("Rear"))
+        rear.transform.position = Vec3(-5.0, 0.0, 0.0)
+        rear.add_component(Collider(size=Vec3(1, 1, 1)))
+        front = actor.add_child(Entity("Front"))
+        front.add_component(Collider(size=Vec3(1, 1, 1)))
+        wall = Entity("Wall", object_type=GAME_OBJECT)
+        wall.transform.position = Vec3(1.0, 0.0, 0.0)
+        wall.add_component(Collider(size=Vec3(1, 2, 2)))
+        scene = Scene("Test", [actor, wall])
+
+        CollisionWorld(scene).step_physics(1.0)
+
+        self.assertEqual(actor.transform.position.x, 0.0)
+        self.assertEqual(physics.velocity.x, 0.0)
+
+    def test_entity_physics_compound_broadphase_skips_distant_colliders(self):
+        actor = Entity("Actor")
+        actor.add_component(EntityPhysics(use_gravity=False, velocity=Vec3(1.0, 0.0, 0.0)))
+        for index in range(30):
+            child = actor.add_child(Entity(f"Collider {index}"))
+            child.transform.position = Vec3(index * 2.0, 0.0, 0.0)
+            child.add_component(Collider(size=Vec3(1, 1, 1)))
+        blockers: list[Entity] = []
+        for index in range(30):
+            blocker = Entity(f"Blocker {index}", object_type=GAME_OBJECT)
+            blocker.transform.position = Vec3(1000.0 + index * 2.0, 0.0, 0.0)
+            blocker.add_component(Collider(size=Vec3(1, 1, 1)))
+            blockers.append(blocker)
+        scene = Scene("Test", [actor, *blockers])
+
+        with mock.patch("p64.engine.collision.collider_bounds", wraps=collision.collider_bounds) as bounds:
+            CollisionWorld(scene).step_physics(1.0)
+
+        self.assertEqual(actor.transform.position.x, 1.0)
+        self.assertLess(bounds.call_count, 100)
+
+    def test_entity_physics_reuses_static_bounds_during_step(self):
+        actor = Entity("Actor")
+        actor.add_component(Collider(size=Vec3(1, 1, 1)))
+        actor.add_component(EntityPhysics(use_gravity=False, velocity=Vec3(1.0, 0.0, 0.0)))
+        blockers: list[Entity] = []
+        for index in range(40):
+            blocker = Entity(f"Blocker {index}", object_type=GAME_OBJECT)
+            blocker.transform.position = Vec3(100.0 + index * 4.0, 0.0, 0.0)
+            blocker.add_component(Collider(size=Vec3(1, 1, 1)))
+            blockers.append(blocker)
+        world = CollisionWorld(Scene("Test", [actor, *blockers]))
+
+        with mock.patch("p64.engine.collision.collider_bounds", wraps=collision.collider_bounds) as bounds:
+            world.step_physics(1.0)
+
+        self.assertEqual(actor.transform.position.x, 1.0)
+        self.assertLessEqual(bounds.call_count, 2)
+
+    def test_spatial_hash_skips_distant_static_narrowphase_candidates(self):
+        actor = Entity("Actor")
+        actor.add_component(Collider(size=Vec3(1, 1, 1)))
+        actor.add_component(EntityPhysics(use_gravity=False, velocity=Vec3(1.0, 0.0, 0.0)))
+        blockers: list[Entity] = []
+        for index in range(50):
+            blocker = Entity(f"Blocker {index}", object_type=GAME_OBJECT)
+            blocker.transform.position = Vec3(1000.0 + index * 4.0, 0.0, 0.0)
+            blocker.add_component(Collider(size=Vec3(1, 1, 1)))
+            blockers.append(blocker)
+        world = CollisionWorld(Scene("Test", [actor, *blockers]))
+
+        with mock.patch("p64.engine.collision._separation", wraps=collision._separation) as separation:
+            world.step_physics(1.0)
+
+        self.assertEqual(actor.transform.position.x, 1.0)
+        separation.assert_not_called()
+
+    def test_entity_physics_ignores_colliders_inside_same_body_subtree(self):
+        actor = Entity("Actor")
+        physics = EntityPhysics(use_gravity=False, velocity=Vec3(1.0, 0.0, 0.0))
+        actor.add_component(Collider(size=Vec3(1, 1, 1)))
+        actor.add_component(physics)
+        child = actor.add_child(Entity("Child"))
+        child.add_component(Collider(size=Vec3(1, 1, 1)))
+        scene = Scene("Test", [actor])
+
+        CollisionWorld(scene).step_physics(1.0)
+
+        self.assertEqual(actor.transform.position.x, 1.0)
+        self.assertEqual(physics.velocity.x, 1.0)
+
+    def test_active_physics_collides_with_passive_dynamic_collider(self):
+        actor = Entity("Actor")
+        physics = EntityPhysics(use_gravity=False, velocity=Vec3(2.0, 0.0, 0.0))
+        actor.add_component(Collider(size=Vec3(1, 1, 1)))
+        actor.add_component(physics)
+        passive = Entity("Passive")
+        passive.transform.position = Vec3(1.0, 0.0, 0.0)
+        passive.add_component(Collider(size=Vec3(1, 1, 1)))
+        scene = Scene("Test", [actor, passive])
+
+        CollisionWorld(scene).step_physics(1.0)
+
+        self.assertEqual(actor.transform.position.x, 0.0)
+        self.assertEqual(physics.velocity.x, 0.0)
+
+    def test_entity_physics_parent_does_not_absorb_child_physics_body(self):
+        parent = Entity("Parent")
+        parent.add_component(EntityPhysics(use_gravity=False, velocity=Vec3(1.0, 0.0, 0.0)))
+        child = parent.add_child(Entity("Child Body"))
+        child.add_component(Collider(size=Vec3(1, 1, 1)))
+        child.add_component(EntityPhysics(use_gravity=False))
+        wall = Entity("Wall", object_type=GAME_OBJECT)
+        wall.transform.position = Vec3(1.0, 0.0, 0.0)
+        wall.add_component(Collider(size=Vec3(1, 2, 2)))
+        scene = Scene("Test", [parent, wall])
+
+        CollisionWorld(scene).step_physics(1.0)
+
+        self.assertEqual(parent.transform.position.x, 1.0)
+
+    def test_child_primitive_collider_bounds_include_parent_transform(self):
+        parent = Entity("Parent")
+        parent.transform.position = Vec3(5.0, 0.0, 0.0)
+        child = parent.add_child(Entity("Child"))
+        child.transform.position = Vec3(1.0, 0.0, 0.0)
+        collider = Collider(size=Vec3(2, 2, 2))
+        child.add_component(collider)
+
+        bounds = collider_bounds(child, collider)
+
+        self.assertEqual(bounds.min.to_list(), [5.0, -1.0, -1.0])
+        self.assertEqual(bounds.max.to_list(), [7.0, 1.0, 1.0])
 
     def test_entity_physics_stops_against_static_mesh_collider(self):
         with TemporaryDirectory() as tmp:
@@ -359,6 +636,21 @@ class CollisionTests(unittest.TestCase):
 
             self.assertEqual(actor.transform.position.y, 0.0)
             self.assertEqual(physics.velocity.y, 0.0)
+
+    def test_mesh_metadata_cache_reuses_and_clears_project_metadata(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_test_mesh(project)
+            renderer = MeshRenderer(mesh=metadata.id, submesh="Body")
+            clear_mesh_geometry_cache(project)
+
+            with mock.patch("p64.engine.mesh_geometry.discover_metadata", wraps=mesh_geometry.discover_metadata) as discover:
+                self.assertIsNotNone(mesh_geometry.mesh_bounds(project, renderer))
+                self.assertIsNotNone(mesh_geometry.mesh_bounds(project, renderer))
+                self.assertEqual(discover.call_count, 1)
+                clear_mesh_geometry_cache(project)
+                self.assertIsNotNone(mesh_geometry.mesh_bounds(project, renderer))
+                self.assertEqual(discover.call_count, 2)
 
 
 def _import_test_mesh(project: Project):

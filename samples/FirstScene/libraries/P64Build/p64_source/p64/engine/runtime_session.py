@@ -12,6 +12,9 @@ from p64.engine.input import InputState
 from p64.engine.scripting import ScriptContext, ScriptManager
 
 
+MAX_PHYSICS_DT = 0.05
+
+
 @dataclass
 class RuntimeScript:
     entry_name: str
@@ -28,6 +31,7 @@ class RuntimeSession:
         except Exception as exc:
             self._record_runtime_error(f"Audio import failed: {exc}")
         self.scene_manager = SceneManager(project, scene)
+        self.collision_world = CollisionWorld(self.scene_manager.current_scene, project)
         self.script_manager = ScriptManager(
             [project.scripts_dir, project.root / "scripts"],
             import_dirs=[project.project_api_dir],
@@ -77,10 +81,11 @@ class RuntimeSession:
                         errors.append(f"{runtime_script.entry_name}.on_update failed: {exc}")
             if self.scene_manager.apply_queued_scene():
                 self.audio.stop_all()
+                self.collision_world = CollisionWorld(self.scene, self.project)
                 self.audio.start_scene(self.scene)
                 errors.extend(self._drain_pending_errors())
                 errors.extend(self._instantiate_scene_scripts())
-            CollisionWorld(self.scene, self.project).step_physics(dt)
+            self.collision_world.step_physics(min(dt, MAX_PHYSICS_DT))
             self.audio.tick(self.scene, dt)
             errors.extend(self._drain_pending_errors())
             self.errors.extend(errors)
@@ -91,7 +96,14 @@ class RuntimeSession:
     def _instantiate_scene_scripts(self) -> list[str]:
         self._scripts = []
         errors: list[str] = []
-        context = ScriptContext(scene=self.scene, project=self.project, scene_manager=self.scene_manager, time=self.time, input=self.input)
+        context = ScriptContext(
+            scene=self.scene,
+            project=self.project,
+            scene_manager=self.scene_manager,
+            collision_world=self.collision_world,
+            time=self.time,
+            input=self.input,
+        )
         for _entity, component in self.scene.script_components():
             for entry, instance, error in self.script_manager.instantiate_component(_entity, component, context):
                 entry_name = f"{entry.script}:{entry.class_name}"

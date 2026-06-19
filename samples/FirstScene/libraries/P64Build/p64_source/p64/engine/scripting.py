@@ -24,6 +24,7 @@ class ScriptContext:
     scene: Scene
     project: Project | None = None
     scene_manager: SceneManager | None = None
+    collision_world: CollisionWorld | None = None
     time: float = 0.0
     input: InputState = field(default_factory=InputState)
 
@@ -52,7 +53,7 @@ class GameScript:
         self.entity_physics = self._find_entity_physics()
         self.audio_source = self._find_audio_source()
         if self.character_controller is not None and context is not None:
-            self.character_controller.bind_runtime(entity, context.scene, context.project)
+            self.character_controller.bind_runtime(entity, context.scene, context.project, context.collision_world)
         for key, value in properties.items():
             setattr(self, key, value)
 
@@ -62,7 +63,7 @@ class GameScript:
     def move_character(self, motion: Vec3, dt: float) -> Vec3:
         if self.scene is None or self.character_controller is None:
             return Vec3()
-        return CollisionWorld(self.scene, self.project).move_character(self.entity, self.character_controller, motion, dt)
+        return self.character_controller.move(motion, dt)
 
     def on_start(self) -> None:
         pass

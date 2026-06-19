@@ -250,23 +250,26 @@ class CharacterController(Component):
     _runtime_entity: Any | None = field(default=None, repr=False, compare=False)
     _runtime_scene: Any | None = field(default=None, repr=False, compare=False)
     _runtime_project: Any | None = field(default=None, repr=False, compare=False)
+    _runtime_collision_world: Any | None = field(default=None, repr=False, compare=False)
     type_name: str = "CharacterController"
 
     @property
     def is_grounded(self) -> bool:
         return self.grounded
 
-    def bind_runtime(self, entity: Any, scene: Any, project: Any | None = None) -> None:
+    def bind_runtime(self, entity: Any, scene: Any, project: Any | None = None, collision_world: Any | None = None) -> None:
         self._runtime_entity = entity
         self._runtime_scene = scene
         self._runtime_project = project
+        self._runtime_collision_world = collision_world
 
     def move(self, motion: Vec3, dt: float) -> Vec3:
         if self._runtime_entity is None or self._runtime_scene is None:
             return Vec3()
         from p64.engine.collision import CollisionWorld
 
-        return CollisionWorld(self._runtime_scene, self._runtime_project).move_character(self._runtime_entity, self, motion, dt)
+        world = self._runtime_collision_world or CollisionWorld(self._runtime_scene, self._runtime_project)
+        return world.move_character(self._runtime_entity, self, motion, dt)
 
     def to_dict(self) -> dict[str, Any]:
         data = Component.to_dict(self)
