@@ -9,9 +9,10 @@ from uuid import uuid4
 
 from p64.engine.audio import import_audio_clip
 from p64.engine.assets import AssetMetadata, model_meshes
+from p64.engine.builtin import PARTICLE_MATERIAL_RELATIVE, SPRITE_MATERIAL_RELATIVE, UI_IMAGE_MATERIAL_RELATIVE
 from p64.engine.collision import apply_mesh_primitive_defaults
-from p64.engine.components import AudioListener, AudioSource, Camera, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, SpawnPoint
-from p64.engine.entity import ENTITY, GAME_OBJECT, Entity
+from p64.engine.components import AudioListener, AudioSource, Camera, Canvas, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ParticleEmitter, RectTransform, ScriptComponent, SpawnPoint, SpriteRenderer, UIImage, UIText
+from p64.engine.entity import ENTITY, GAME_OBJECT, Entity, entity_under_canvas
 from p64.engine.files import find_metadata_for_source, is_metadata_file, iter_metadata_files, metadata_path_for_source
 from p64.engine.material import (
     create_material_from_defaults,
@@ -22,6 +23,7 @@ from p64.engine.material import (
     save_material_metadata,
     resolve_material_reference,
 )
+from p64.engine.math import Vec3
 from p64.engine.obj import import_obj_to_project
 from p64.engine.project import Project
 from p64.engine.scene import Scene
@@ -111,6 +113,7 @@ def split_mesh_renderer_into_children(entity: Entity, metadata: AssetMetadata) -
             continue
         source_materials = [str(item) for item in mesh_entry.get("material_slots", [])]
         material = source_materials[0] if source_materials else None
+        child = Entity(name, object_type=entity.object_type)
         child.add_component(
             MeshRenderer(
                 mesh=str(mesh_entry.get("id") or ""),
@@ -351,6 +354,18 @@ def open_script_in_vscode_project(project: Project, script_path: Path, fallback_
 def add_component(entity: Entity, component_name: str, project: Project | None = None) -> object:
     if component_name == "MeshRenderer":
         return entity.add_component(MeshRenderer())
+    if component_name == "SpriteRenderer":
+        return entity.add_component(SpriteRenderer(material=SPRITE_MATERIAL_RELATIVE))
+    if component_name == "Canvas":
+        return entity.add_component(Canvas())
+    if component_name == "UIImage":
+        _ensure_ui_rect_transform(entity, Vec3(128.0, 128.0, 0.0))
+        return entity.add_component(UIImage(material=UI_IMAGE_MATERIAL_RELATIVE))
+    if component_name == "UIText":
+        _ensure_ui_rect_transform(entity, Vec3(240.0, 40.0, 0.0))
+        return entity.add_component(UIText())
+    if component_name == "ParticleEmitter":
+        return entity.add_component(ParticleEmitter(material=PARTICLE_MATERIAL_RELATIVE))
     if component_name == "Camera":
         return entity.add_component(Camera())
     if component_name == "Light":
@@ -375,6 +390,11 @@ def add_component(entity: Entity, component_name: str, project: Project | None =
         entity.object_type = ENTITY
         return entity.add_component(EntityPhysics())
     raise ValueError(f"Unknown component: {component_name}")
+
+
+def _ensure_ui_rect_transform(entity: Entity, size: Vec3 | None = None) -> None:
+    if entity.rect_transform is None and entity_under_canvas(entity):
+        entity.rect_transform = RectTransform(size=size or Vec3(160.0, 48.0, 0.0))
 
 
 def _regenerate_ids(entity: Entity) -> None:

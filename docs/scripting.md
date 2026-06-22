@@ -39,6 +39,26 @@ Every `GameScript` instance receives these fields:
 - `self.character_controller`: the entity's `CharacterController`, if present
 - `self.entity_physics`: the entity's `EntityPhysics`, if present
 - `self.audio_source`: the entity's first `AudioSource`, if present
+- `self.forward`, `self.right`, `self.up`: readonly world direction vectors from the entity transform
+
+## Transform Direction Helpers
+
+`self.transform.position`, `self.transform.rotation`, and `self.transform.scale`
+are local to the parent. For root objects, those local values are also the world
+values.
+
+`self.transform.forward`, `self.transform.right`, and `self.transform.up` are
+computed from the object's effective rotation. They are not constant global
+vectors. A root object with `rotation.y = 90` has a different
+`self.transform.forward` than `Vec3.forward()`, and a child object also includes
+the rotation inherited from its parents.
+
+Use `self.transform.local_forward`, `self.transform.local_right`, and
+`self.transform.local_up` when you explicitly want directions from only the
+object's local rotation.
+
+`self.transform.scene_object` returns the entity that owns the transform.
+`self.transform.sceneObject` is also available as a Unity-style alias.
 
 ## Rotate An Object
 
@@ -129,7 +149,7 @@ class Push(GameScript):
     def on_update(self, dt):
         if self.entity_physics is None:
             return
-        self.entity_physics.add_force(Vec3(4.0, 0.0, 0.0))
+        self.entity_physics.add_force(self.transform.forward * 4.0)
         if self.input.was_key_pressed("space"):
             self.entity_physics.add_impulse(Vec3(0.0, 3.0, 0.0))
 ```

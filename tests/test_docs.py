@@ -49,6 +49,9 @@ class DocumentationTests(unittest.TestCase):
         self.assertFalse(hasattr(scripting, "UserScript"))
         self.assertTrue(hasattr(scripting.GameScript, "persistent"))
         self.assertTrue(hasattr(scripting.GameScript, "move_character"))
+        self.assertTrue(hasattr(scripting.GameScript, "forward"))
+        self.assertTrue(hasattr(scripting.GameScript, "right"))
+        self.assertTrue(hasattr(scripting.GameScript, "up"))
         self.assertTrue(hasattr(scripting.GameScript, "on_start"))
         self.assertTrue(hasattr(scripting.GameScript, "on_update"))
         for name in [

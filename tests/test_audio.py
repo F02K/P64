@@ -266,6 +266,26 @@ class AudioSourceTests(unittest.TestCase):
             self.assertNotIn(id(source), audio._channels)
             self.assertEqual(channel.volume_calls, [])
 
+    def test_tick_uses_bound_audio_sources_without_rescanning_scene(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            source = AudioSource(loop=True)
+            speaker = Entity("Speaker", components=[source])
+            listener = Entity("Listener", components=[AudioListener()])
+            scene = Scene("Audio", [listener, speaker])
+            audio = AudioSystem(project)
+            audio.bind_scene(scene)
+            channel = _FakeChannel()
+            audio._channels[id(source)] = channel
+            scene.walk = mock.Mock(side_effect=AssertionError("tick should use cached audio bindings"))
+            scene.walk_active = mock.Mock(side_effect=AssertionError("tick should use cached listener bindings"))
+
+            audio.tick(scene, 1 / 60)
+
+            self.assertEqual(audio.source_count(), 1)
+            self.assertEqual(audio.channel_count(), 1)
+            self.assertEqual(channel.volume_calls, [(1.0, 1.0)])
+
     def test_runtime_play_on_awake_and_script_methods_use_audio_system(self):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")

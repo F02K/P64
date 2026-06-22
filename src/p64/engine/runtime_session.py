@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -8,6 +9,7 @@ from p64.engine.scene import Scene
 from p64.engine.scene_manager import SceneManager
 from p64.engine.audio import AudioSystem, ensure_audio_clips_for_assets
 from p64.engine.collision import CollisionWorld
+from p64.engine.entity import entity_effectively_active
 from p64.engine.input import InputState
 from p64.engine.scripting import ScriptContext, ScriptManager
 
@@ -41,6 +43,7 @@ class RuntimeSession:
         self.time = 0.0
         self._scripts: list[RuntimeScript] = []
         self._started = False
+        self.profiler_recorder: Any | None = None
 
     @property
     def scene(self) -> Scene:
@@ -64,29 +67,46 @@ class RuntimeSession:
     def tick(self, dt: float) -> list[str]:
         dt = max(0.0, dt)
         self.input.begin_frame()
-        errors = self.start()
+        profiler = self.profiler_recorder
+        with _profiler_section(profiler, "runtime start"):
+            errors = self.start()
         try:
-            self.time += dt
-            for runtime_script in list(self._scripts):
-                instance = runtime_script.instance
-                instance.scene = self.scene
-                instance.project = self.project
-                instance.scene_manager = self.scene_manager
-                instance.input = self.input
-                instance.time = self.time
-                if hasattr(instance, "on_update"):
-                    try:
-                        instance.on_update(dt)
-                    except Exception as exc:  # pragma: no cover - exact user code is unknowable
-                        errors.append(f"{runtime_script.entry_name}.on_update failed: {exc}")
-            if self.scene_manager.apply_queued_scene():
-                self.audio.stop_all()
-                self.collision_world = CollisionWorld(self.scene, self.project)
-                self.audio.start_scene(self.scene)
-                errors.extend(self._drain_pending_errors())
-                errors.extend(self._instantiate_scene_scripts())
-            self.collision_world.step_physics(min(dt, MAX_PHYSICS_DT))
-            self.audio.tick(self.scene, dt)
+            with _profiler_section(profiler, "runtime total"):
+                self.time += dt
+                _profiler_add_count(profiler, "runtime scripts", len(self._scripts))
+                with _profiler_section(profiler, "runtime scripts"):
+                    for runtime_script in list(self._scripts):
+                        instance = runtime_script.instance
+                        instance.scene = self.scene
+                        instance.project = self.project
+                        instance.scene_manager = self.scene_manager
+                        instance.input = self.input
+                        instance.time = self.time
+                        if not entity_effectively_active(instance.entity):
+                            continue
+                        if hasattr(instance, "on_update"):
+                            try:
+                                if _profiler_sample_details(profiler):
+                                    with _profiler_section(profiler, "script", runtime_script.entry_name):
+                                        instance.on_update(dt)
+                                else:
+                                    instance.on_update(dt)
+                            except Exception as exc:  # pragma: no cover - exact user code is unknowable
+                                errors.append(f"{runtime_script.entry_name}.on_update failed: {exc}")
+                with _profiler_section(profiler, "runtime scene switch"):
+                    if self.scene_manager.apply_queued_scene():
+                        self.audio.stop_all()
+                        self.collision_world = CollisionWorld(self.scene, self.project)
+                        self.audio.start_scene(self.scene)
+                        errors.extend(self._drain_pending_errors())
+                        errors.extend(self._instantiate_scene_scripts())
+                _profiler_add_count(profiler, "physics bodies", self.collision_world.physics_body_count())
+                with _profiler_section(profiler, "runtime physics"):
+                    self.collision_world.step_physics(min(dt, MAX_PHYSICS_DT))
+                with _profiler_section(profiler, "runtime audio"):
+                    self.audio.tick(self.scene, dt)
+                _profiler_add_count(profiler, "audio sources", self.audio.source_count())
+                _profiler_add_count(profiler, "audio channels", self.audio.channel_count())
             errors.extend(self._drain_pending_errors())
             self.errors.extend(errors)
             return errors
@@ -125,3 +145,30 @@ class RuntimeSession:
         errors = list(self._pending_errors)
         self._pending_errors.clear()
         return errors
+
+
+def _profiler_section(profiler: Any | None, name: str, detail: str = "") -> Any:
+    if profiler is None:
+        return nullcontext()
+    try:
+        return profiler.section(name, str(detail or ""))
+    except Exception:
+        return nullcontext()
+
+
+def _profiler_sample_details(profiler: Any | None) -> bool:
+    if profiler is None:
+        return False
+    try:
+        return bool(profiler.sample_details())
+    except Exception:
+        return False
+
+
+def _profiler_add_count(profiler: Any | None, name: str, amount: int) -> None:
+    if profiler is None:
+        return
+    try:
+        profiler.add_count(name, amount)
+    except Exception:
+        return

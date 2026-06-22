@@ -8,6 +8,7 @@ from p64.engine.scene import Scene
 from p64.engine.scene_manager import SceneManager
 from p64.engine.audio import AudioSystem, ensure_audio_clips_for_assets
 from p64.engine.collision import CollisionWorld
+from p64.engine.entity import entity_effectively_active
 from p64.engine.input import InputState
 from p64.engine.scripting import ScriptContext, ScriptManager
 
@@ -74,6 +75,8 @@ class RuntimeSession:
                 instance.scene_manager = self.scene_manager
                 instance.input = self.input
                 instance.time = self.time
+                if not entity_effectively_active(instance.entity):
+                    continue
                 if hasattr(instance, "on_update"):
                     try:
                         instance.on_update(dt)

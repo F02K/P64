@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from math import sqrt
 from typing import Iterable
 
-from p64.engine.assets import AssetMetadata, discover_metadata, resolve_model_mesh
-from p64.engine.components import MeshRenderer
+from p64.engine.assets import AssetMetadata, discover_metadata, model_meshes, resolve_model_mesh
+from p64.engine.components import MeshRenderer, ModelRenderer
 from p64.engine.entity import Entity
 from p64.engine.files import metadata_path_for_source
 from p64.engine.math import Vec3
@@ -13,6 +13,7 @@ from p64.engine.obj import ObjGroup, parse_obj
 from p64.engine.project import Project
 
 Triangle = tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]
+RenderGeometry = MeshRenderer | ModelRenderer
 
 
 @dataclass(frozen=True)
@@ -36,7 +37,48 @@ def mesh_renderer_for(entity: Entity) -> MeshRenderer | None:
     return None
 
 
-def mesh_bounds(project: Project, component: MeshRenderer) -> tuple[Vec3, Vec3] | None:
+def render_geometry_for(entity: Entity) -> RenderGeometry | None:
+    for component in entity.components:
+        if isinstance(component, MeshRenderer) and component.enabled:
+            return component
+    for component in entity.components:
+        if isinstance(component, ModelRenderer) and component.enabled and component.visible:
+            return component
+    return None
+
+
+def mesh_bounds(project: Project, component: RenderGeometry | None) -> tuple[Vec3, Vec3] | None:
+    if component is None:
+        return None
+    if isinstance(component, ModelRenderer):
+        metadata = _metadata_by_id(project).get(component.model)
+        if metadata is None:
+            return None
+        bounds_values: list[tuple[Vec3, Vec3]] = []
+        for mesh in model_meshes(metadata):
+            bounds = mesh.get("bounds")
+            if isinstance(bounds, dict) and isinstance(bounds.get("min"), list) and isinstance(bounds.get("max"), list):
+                bounds_values.append((Vec3.from_value(bounds["min"]), Vec3.from_value(bounds["max"])))
+        if bounds_values:
+            return (
+                Vec3(
+                    min(item[0].x for item in bounds_values),
+                    min(item[0].y for item in bounds_values),
+                    min(item[0].z for item in bounds_values),
+                ),
+                Vec3(
+                    max(item[1].x for item in bounds_values),
+                    max(item[1].y for item in bounds_values),
+                    max(item[1].z for item in bounds_values),
+                ),
+            )
+        positions = [position for triangle in mesh_triangles(project, component) for position in triangle]
+        if not positions:
+            return None
+        return (
+            Vec3(*(min(position[index] for position in positions) for index in range(3))),
+            Vec3(*(max(position[index] for position in positions) for index in range(3))),
+        )
     metadata, mesh = resolve_model_mesh(_metadata_by_id(project), component.mesh, component.submesh)
     bounds = mesh.get("bounds") if mesh else None
     if isinstance(bounds, dict) and isinstance(bounds.get("min"), list) and isinstance(bounds.get("max"), list):
@@ -50,10 +92,31 @@ def mesh_bounds(project: Project, component: MeshRenderer) -> tuple[Vec3, Vec3] 
     )
 
 
-def mesh_triangles(project: Project, component: MeshRenderer) -> list[Triangle]:
-    key = (str(project.root.resolve()), component.mesh, component.submesh)
+def mesh_triangles(project: Project, component: RenderGeometry | None) -> list[Triangle]:
+    if component is None:
+        return []
+    key = _geometry_cache_key(project, component)
     if key in _MESH_TRIANGLE_CACHE:
         return _MESH_TRIANGLE_CACHE[key]
+    if isinstance(component, ModelRenderer):
+        metadata = _metadata_by_id(project).get(component.model)
+        if metadata is None:
+            return []
+        baked = _baked_mesh_triangles(metadata, None, component)
+        if baked is not None:
+            _MESH_TRIANGLE_CACHE[key] = baked
+            return baked
+        obj_mesh = parse_obj(project.root / metadata.source)
+        source_groups = {str(mesh.get("source_group") or mesh.get("name") or "") for mesh in model_meshes(metadata)}
+        triangles = [
+            tuple(vertex.position for vertex in face.vertices)
+            for group in obj_mesh.groups
+            if not source_groups or group.name in source_groups
+            for face in group.faces
+            if len(face.vertices) == 3
+        ]
+        _MESH_TRIANGLE_CACHE[key] = triangles
+        return triangles
     metadata, mesh = resolve_model_mesh(_metadata_by_id(project), component.mesh, component.submesh)
     if metadata is None:
         return []
@@ -71,15 +134,21 @@ def mesh_triangles(project: Project, component: MeshRenderer) -> list[Triangle]:
     return triangles
 
 
-def ensure_mesh_collision_metadata(project: Project, component: MeshRenderer) -> None:
+def ensure_mesh_collision_metadata(project: Project, component: RenderGeometry | None) -> None:
+    if component is None:
+        return
     metadata_by_id = _metadata_by_id(project)
-    metadata, mesh = resolve_model_mesh(metadata_by_id, component.mesh, component.submesh)
+    if isinstance(component, ModelRenderer):
+        metadata = metadata_by_id.get(component.model)
+        mesh = None
+    else:
+        metadata, mesh = resolve_model_mesh(metadata_by_id, component.mesh, component.submesh)
     if metadata is None:
         return
-    mesh_id = str(mesh.get("id")) if mesh and mesh.get("id") else component.mesh
+    mesh_ids = [str(item.get("id") or "") for item in model_meshes(metadata)] if isinstance(component, ModelRenderer) else [str(mesh.get("id")) if mesh and mesh.get("id") else component.mesh]
     collision = metadata.settings.get("collision")
     meshes = collision.get("meshes") if isinstance(collision, dict) else None
-    if isinstance(meshes, dict) and mesh_id in meshes:
+    if isinstance(meshes, dict) and all(mesh_id in meshes for mesh_id in mesh_ids if mesh_id):
         return
     source = project.root / metadata.source
     obj_mesh = parse_obj(source)
@@ -102,8 +171,10 @@ def ensure_mesh_collision_metadata(project: Project, component: MeshRenderer) ->
     clear_mesh_geometry_cache(project)
 
 
-def convex_hull(project: Project, component: MeshRenderer) -> ConvexHull | None:
-    key = (str(project.root.resolve()), component.mesh, component.submesh)
+def convex_hull(project: Project, component: RenderGeometry | None) -> ConvexHull | None:
+    if component is None:
+        return None
+    key = _geometry_cache_key(project, component)
     if key not in _CONVEX_HULL_CACHE:
         _CONVEX_HULL_CACHE[key] = build_convex_hull(_mesh_points(project, component))
     return _CONVEX_HULL_CACHE[key]
@@ -222,7 +293,7 @@ def transformed_bounds(entity: Entity, local_bounds: tuple[Vec3, Vec3]) -> tuple
     return bounds_from_points(transform_point(matrix, point) for point in corners)
 
 
-def _mesh_points(project: Project, component: MeshRenderer) -> list[tuple[float, float, float]]:
+def _mesh_points(project: Project, component: RenderGeometry) -> list[tuple[float, float, float]]:
     return [point for triangle in mesh_triangles(project, component) for point in triangle]
 
 
@@ -249,13 +320,21 @@ def _collision_entry_for_group(group: ObjGroup) -> dict[str, object]:
     }
 
 
-def _baked_mesh_triangles(metadata: AssetMetadata, mesh: dict[str, object] | None, component: MeshRenderer) -> list[Triangle] | None:
+def _baked_mesh_triangles(metadata: AssetMetadata, mesh: dict[str, object] | None, component: RenderGeometry) -> list[Triangle] | None:
     collision = metadata.settings.get("collision")
     if not isinstance(collision, dict) or int(collision.get("version", 0) or 0) < 1:
         return None
     meshes = collision.get("meshes")
     if not isinstance(meshes, dict):
         return None
+    if isinstance(component, ModelRenderer):
+        triangles: list[Triangle] = []
+        for mesh_entry in model_meshes(metadata):
+            entry_id = str(mesh_entry.get("id") or "")
+            entry = meshes.get(entry_id)
+            if isinstance(entry, dict):
+                triangles.extend(_triangles_from_collision_entry(entry))
+        return triangles if triangles else None
     mesh_id = str(mesh.get("id")) if mesh and mesh.get("id") else component.mesh
     entry = meshes.get(mesh_id)
     if not isinstance(entry, dict) and mesh is not None:
@@ -269,9 +348,13 @@ def _baked_mesh_triangles(metadata: AssetMetadata, mesh: dict[str, object] | Non
         )
     if not isinstance(entry, dict):
         return None
+    return _triangles_from_collision_entry(entry)
+
+
+def _triangles_from_collision_entry(entry: dict[str, object]) -> list[Triangle]:
     raw_triangles = entry.get("triangles")
     if not isinstance(raw_triangles, list):
-        return None
+        return []
     triangles: list[Triangle] = []
     for raw_triangle in raw_triangles:
         if not isinstance(raw_triangle, list) or len(raw_triangle) != 3:
@@ -287,6 +370,12 @@ def _baked_mesh_triangles(metadata: AssetMetadata, mesh: dict[str, object] | Non
         if len(points) == 3:
             triangles.append((points[0], points[1], points[2]))
     return triangles
+
+
+def _geometry_cache_key(project: Project, component: RenderGeometry) -> tuple[str, str, str | None]:
+    if isinstance(component, ModelRenderer):
+        return (str(project.root.resolve()), f"model:{component.model}", None)
+    return (str(project.root.resolve()), f"mesh:{component.mesh}", component.submesh)
 
 
 def _unique_points(points: Iterable[tuple[float, float, float] | Vec3]) -> list[Vec3]:

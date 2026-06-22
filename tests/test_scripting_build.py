@@ -115,7 +115,7 @@ class ScriptingBuildTests(unittest.TestCase):
                 "from p64.engine.scripting import GameScript\n"
                 "class Push(GameScript):\n"
                 "    def on_update(self, dt):\n"
-                "        self.entity_physics.add_force(Vec3(4.0, 0.0, 0.0))\n",
+                "        self.entity_physics.add_force(Vec3(1.0, 0.0, 0.0) * 4.0)\n",
                 encoding="utf-8",
             )
             scene = project.load_startup_scene()
@@ -132,6 +132,58 @@ class ScriptingBuildTests(unittest.TestCase):
             runtime_actor = session.scene.find(actor.id)
             self.assertIsNotNone(runtime_actor)
             self.assertGreater(runtime_actor.transform.position.x, 0.0)
+
+    def test_runtime_script_can_push_entity_along_world_forward(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            (project.scripts_dir / "drive.py").write_text(
+                "from p64.engine.scripting import GameScript\n"
+                "class Drive(GameScript):\n"
+                "    def on_update(self, dt):\n"
+                "        self.entity_physics.add_force(self.forward * 4.0)\n",
+                encoding="utf-8",
+            )
+            scene = project.load_startup_scene()
+            car = Entity("Car")
+            car.transform.rotation = Vec3(0.0, 90.0, 0.0)
+            car.add_component(EntityPhysics(use_gravity=False))
+            car.add_component(ScriptComponent(scripts=[ScriptEntry(script="drive.py", class_name="Drive")]))
+            scene.add_entity(car)
+
+            session = RuntimeSession(project, scene)
+            errors = session.tick(1.0)
+
+            self.assertEqual(errors, [])
+            runtime_car = session.scene.find(car.id)
+            self.assertIsNotNone(runtime_car)
+            self.assertLess(runtime_car.transform.position.x, 0.0)
+            self.assertAlmostEqual(runtime_car.transform.position.z, 0.0, places=6)
+
+    def test_runtime_script_can_use_transform_forward(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            (project.scripts_dir / "drive.py").write_text(
+                "from p64.engine.scripting import GameScript\n"
+                "class Drive(GameScript):\n"
+                "    def on_update(self, dt):\n"
+                "        self.entity_physics.add_force(self.transform.forward * 4.0)\n",
+                encoding="utf-8",
+            )
+            scene = project.load_startup_scene()
+            car = Entity("Car")
+            car.transform.rotation = Vec3(0.0, 90.0, 0.0)
+            car.add_component(EntityPhysics(use_gravity=False))
+            car.add_component(ScriptComponent(scripts=[ScriptEntry(script="drive.py", class_name="Drive")]))
+            scene.add_entity(car)
+
+            session = RuntimeSession(project, scene)
+            errors = session.tick(1.0)
+
+            self.assertEqual(errors, [])
+            runtime_car = session.scene.find(car.id)
+            self.assertIsNotNone(runtime_car)
+            self.assertLess(runtime_car.transform.position.x, 0.0)
+            self.assertAlmostEqual(runtime_car.transform.position.z, 0.0, places=6)
 
     def test_runtime_session_clamps_physics_dt_but_not_script_dt(self):
         with TemporaryDirectory() as tmp:

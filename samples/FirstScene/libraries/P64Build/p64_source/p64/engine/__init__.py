@@ -3,15 +3,21 @@ from p64.engine.components import (
     AudioListener,
     AudioSource,
     Camera,
+    Canvas,
+    RectTransform,
     CharacterController,
     Collider,
     EntityPhysics,
     Fog,
+    UIImage,
+    UIText,
     Light,
     MeshRenderer,
+    ParticleEmitter,
     ScriptComponent,
     ScriptEntry,
     SpawnPoint,
+    SpriteRenderer,
     Transform,
 )
 from p64.engine.entity import ENTITY, GAME_OBJECT, Entity, SceneObject, set_object_type_recursive
@@ -19,9 +25,12 @@ from p64.engine.project import Project
 from p64.engine.scene import Scene
 from p64.engine.scene_manager import SceneManager
 from p64.engine.scripting import GameScript
+from p64.engine.transforms import local_to_world_direction, parent_world_matrix, set_world_position, set_world_rotation, world_forward, world_matrix, world_position, world_right, world_rotation, world_scale, world_up
 
 __all__ = [
     "Camera",
+    "Canvas",
+    "RectTransform",
     "AudioListener",
     "AudioSource",
     "CharacterController",
@@ -33,8 +42,11 @@ __all__ = [
     "Fog",
     "GAME_OBJECT",
     "GameScript",
+    "UIImage",
+    "UIText",
     "Light",
     "MeshRenderer",
+    "ParticleEmitter",
     "Project",
     "Scene",
     "SceneObject",
@@ -43,5 +55,17 @@ __all__ = [
     "ScriptComponent",
     "ScriptEntry",
     "SpawnPoint",
+    "SpriteRenderer",
     "Transform",
+    "parent_world_matrix",
+    "set_world_position",
+    "set_world_rotation",
+    "local_to_world_direction",
+    "world_forward",
+    "world_matrix",
+    "world_position",
+    "world_right",
+    "world_rotation",
+    "world_scale",
+    "world_up",
 ]

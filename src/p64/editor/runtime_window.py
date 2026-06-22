@@ -9,6 +9,7 @@ from p64.editor.viewport import create_viewport_class
 def launch_runtime_window(project: Project, scene: Scene) -> None:
     try:
         from PySide6.QtCore import QElapsedTimer, QTimer, Qt
+        from PySide6.QtGui import QSurfaceFormat
         from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
         try:
             from PySide6.QtOpenGLWidgets import QOpenGLWidget
@@ -16,6 +17,13 @@ def launch_runtime_window(project: Project, scene: Scene) -> None:
             QOpenGLWidget = None
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("Install PySide6 to run P64 projects.") from exc
+
+    surface_format = QSurfaceFormat()
+    surface_format.setVersion(3, 3)
+    surface_format.setProfile(QSurfaceFormat.CoreProfile)
+    surface_format.setDepthBufferSize(24)
+    surface_format.setSwapInterval(0)
+    QSurfaceFormat.setDefaultFormat(surface_format)
 
     app = QApplication.instance() or QApplication([])
     window = QWidget()
@@ -52,6 +60,7 @@ def launch_runtime_window(project: Project, scene: Scene) -> None:
     clock = QElapsedTimer()
     clock.start()
     timer = QTimer(window)
+    timer.setTimerType(Qt.PreciseTimer)
 
     def tick() -> None:
         elapsed_ms = clock.restart()

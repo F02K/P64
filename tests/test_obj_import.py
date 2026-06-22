@@ -3,7 +3,8 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from p64.engine.assets import discover_assets
-from p64.engine.obj import import_obj_to_project, mesh_vertices_for_group, parse_mtl, parse_obj
+from p64.engine.components import ModelRenderer
+from p64.engine.obj import MODEL_CACHE_VERSION, import_obj_to_project, mesh_vertices_for_group, model_source_signature, parse_mtl, parse_obj
 from p64.engine.project import Project
 
 
@@ -106,11 +107,16 @@ class ObjImportTests(unittest.TestCase):
             self.assertEqual(model["meshes"][0]["triangle_count"], 2)
             self.assertEqual(model["meshes"][0]["bounds"]["min"], [0.0, 0.0, 0.0])
             self.assertGreater(len(model["meshes"][0]["wireframe"]["vertices"]), 0)
+            cache = metadata.settings["model_cache"]
+            self.assertEqual(cache["version"], MODEL_CACHE_VERSION)
+            self.assertEqual(cache["source_signature"], model_source_signature(project.root / metadata.source))
+            self.assertEqual(cache["mesh_count"], 2)
+            self.assertEqual(cache["batch_count"], 1)
             self.assertTrue((project.assets_dir / "scene.obj.mdp64").exists())
             self.assertTrue(imported.is_game_object)
-            self.assertEqual([child.name for child in imported.children], ["Floor", "Door"])
-            self.assertTrue(all(child.is_game_object for child in imported.children))
-            self.assertEqual(imported.children[0].components[0].mesh, model["meshes"][0]["id"])
+            self.assertEqual(imported.children, [])
+            self.assertIsInstance(imported.components[0], ModelRenderer)
+            self.assertEqual(imported.components[0].model, metadata.id)
 
     def test_import_obj_records_per_mesh_material_slots(self):
         with TemporaryDirectory() as tmp:
@@ -136,6 +142,9 @@ class ObjImportTests(unittest.TestCase):
             mesh = metadata.settings["model"]["meshes"][0]
             self.assertEqual(mesh["material_slots"], ["Stone", "Moss"])
             self.assertEqual(mesh["triangle_count"], 2)
+            cache = metadata.settings["model_cache"]
+            self.assertEqual(cache["batch_count"], 2)
+            self.assertEqual([batch["material"] for batch in cache["batches"]], ["Stone", "Moss"])
 
     def test_reimport_obj_preserves_existing_metadata_id(self):
         with TemporaryDirectory() as tmp:
@@ -148,6 +157,60 @@ class ObjImportTests(unittest.TestCase):
 
             self.assertEqual(second.id, first.id)
             self.assertIn("model", second.settings)
+            self.assertIn("model_cache", second.settings)
+
+    def test_import_obj_copies_absolute_mtl_texture_next_to_copied_mtl(self):
+        with TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "VRML"
+            source_dir.mkdir()
+            texture = source_dir / "Shape.163.bmp"
+            texture.write_bytes(b"bmp")
+            obj = source_dir / "luigi.obj"
+            mtl = source_dir / "luigi.mtl"
+            obj.write_text(
+                "mtllib luigi.mtl\n"
+                "o Body\n"
+                "v 0 0 0\n"
+                "v 1 0 0\n"
+                "v 0 1 0\n"
+                "usemtl Mat\n"
+                "f 1 2 3\n",
+                encoding="utf-8",
+            )
+            mtl.write_text(f"newmtl Mat\nmap_Kd {texture}\n", encoding="utf-8")
+            project = Project.create(Path(tmp) / "Game")
+
+            metadata = import_obj_to_project(project, obj)
+            copied_mtl = project.root / metadata.source
+            copied_mtl = copied_mtl.with_suffix(".mtl")
+
+            self.assertTrue((copied_mtl.parent / "Shape.163.bmp").exists())
+            self.assertIn("map_Kd Shape.163.bmp", copied_mtl.read_text(encoding="utf-8"))
+            self.assertEqual(metadata.settings["material_defs"]["Mat"]["diffuse_texture"], "Shape.163.bmp")
+
+    def test_import_obj_missing_absolute_mtl_texture_is_nonfatal(self):
+        with TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "VRML"
+            source_dir.mkdir()
+            missing_texture = source_dir / "Missing.bmp"
+            obj = source_dir / "luigi.obj"
+            mtl = source_dir / "luigi.mtl"
+            obj.write_text(
+                "mtllib luigi.mtl\n"
+                "o Body\n"
+                "v 0 0 0\n"
+                "v 1 0 0\n"
+                "v 0 1 0\n"
+                "usemtl Mat\n"
+                "f 1 2 3\n",
+                encoding="utf-8",
+            )
+            mtl.write_text(f"newmtl Mat\nmap_Kd {missing_texture}\n", encoding="utf-8")
+            project = Project.create(Path(tmp) / "Game")
+
+            metadata = import_obj_to_project(project, obj)
+
+            self.assertEqual(metadata.settings["material_defs"]["Mat"]["diffuse_texture"], missing_texture.as_posix())
 
     def test_mtl_parser_resolves_diffuse_texture(self):
         mtl = Path("samples/FirstScene/assets/Ocarina/model.mtl")

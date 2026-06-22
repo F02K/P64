@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from p64.engine.assets import AssetMetadata, discover_metadata
-from p64.engine.components import AudioSource
+from p64.engine.components import AudioListener, AudioSource
+from p64.engine.entity import entity_effectively_active
 from p64.engine.files import find_metadata_for_source, metadata_path_for_source
 from p64.engine.math import Vec3
 from p64.engine.project import Project
 from p64.engine.scene import Scene
+from p64.engine.transforms import world_position as transform_world_position, world_rotation as transform_world_rotation
 
 
 MAX_AUDIO_SAMPLE_RATE = 22050
@@ -134,55 +136,57 @@ class AudioSystem:
         self._metadata = self._load_metadata()
         self._available: bool | None = None
         self._scene: Scene | None = None
+        self._audio_sources: list[tuple[Any, AudioSource]] = []
+        self._listener_entities: list[Any] = []
         self._missing_listener_logged = False
 
     def bind_scene(self, scene: Scene) -> None:
         self._scene = scene
+        self._audio_sources = []
+        self._listener_entities = []
         self._missing_listener_logged = False
         for entity in scene.walk():
             for component in entity.components:
                 if isinstance(component, AudioSource):
                     component.bind_runtime(self, entity)
+                    self._audio_sources.append((entity, component))
+                elif isinstance(component, AudioListener):
+                    self._listener_entities.append(entity)
 
     def start_scene(self, scene: Scene) -> None:
         self.bind_scene(scene)
-        for entity in scene.walk():
-            if not entity.active:
-                continue
-            for component in entity.components:
-                if isinstance(component, AudioSource) and component.enabled and component.play_on_awake:
-                    self.play(entity, component)
+        for entity, component in self._audio_sources:
+            if component.enabled and component.play_on_awake:
+                self.play(entity, component)
 
     def tick(self, scene: Scene, _dt: float) -> None:
-        listener = _listener_pose(scene)
+        if scene is not self._scene:
+            self.bind_scene(scene)
+        listener = self._listener_pose()
         if listener is None:
             if self._channels:
                 self._log_missing_listener()
                 self.stop_all()
             return
         listener_position, listener_rotation = listener
-        for entity in scene.walk():
-            for component in entity.components:
-                if not isinstance(component, AudioSource):
-                    continue
-                component.bind_runtime(self, entity)
-                component_id = id(component)
-                channel = self._channels.get(component_id)
-                if channel is None:
-                    continue
-                if not entity.active or not component.enabled:
-                    self.stop(component)
-                    continue
-                try:
-                    if not component.loop and component_id not in self._paused and hasattr(channel, "get_busy") and not channel.get_busy():
-                        self._channels.pop(component_id, None)
-                        continue
-                    left, right = spatial_gains(component, _world_position(entity), listener_position, listener_rotation)
-                    channel.set_volume(left, right)
-                except Exception as exc:
+        for entity, component in self._audio_sources:
+            component_id = id(component)
+            channel = self._channels.get(component_id)
+            if channel is None:
+                continue
+            if not entity_effectively_active(entity) or not component.enabled:
+                self.stop(component)
+                continue
+            try:
+                if not component.loop and component_id not in self._paused and hasattr(channel, "get_busy") and not channel.get_busy():
                     self._channels.pop(component_id, None)
-                    self._paused.discard(component_id)
-                    self._log(f"Audio channel update failed: {exc}")
+                    continue
+                left, right = spatial_gains(component, _world_position(entity), listener_position, listener_rotation)
+                channel.set_volume(left, right)
+            except Exception as exc:
+                self._channels.pop(component_id, None)
+                self._paused.discard(component_id)
+                self._log(f"Audio channel update failed: {exc}")
 
     def stop_all(self) -> None:
         for channel in list(self._channels.values()):
@@ -191,9 +195,9 @@ class AudioSystem:
         self._paused.clear()
 
     def play(self, entity: Any, source: AudioSource) -> bool:
-        if not source.enabled or not source.clip:
+        if not entity_effectively_active(entity) or not source.enabled or not source.clip:
             return False
-        listener = _listener_pose(self._scene) if self._scene else None
+        listener = self._listener_pose() if self._scene else None
         if listener is None:
             self._log_missing_listener()
             return False
@@ -312,6 +316,21 @@ class AudioSystem:
             return
         self._missing_listener_logged = True
         self._log("Audio listener missing: add an AudioListener component to the camera or another active entity.")
+
+    def source_count(self) -> int:
+        return len(self._audio_sources)
+
+    def channel_count(self) -> int:
+        return len(self._channels)
+
+    def _listener_pose(self) -> tuple[Vec3, Vec3] | None:
+        for entity in self._listener_entities:
+            if not entity_effectively_active(entity):
+                continue
+            for component in entity.components:
+                if isinstance(component, AudioListener) and component.enabled and component.active:
+                    return _world_position(entity), _world_rotation(entity)
+        return None
 
 
 def spatial_gains(source: AudioSource, position: Vec3, listener: Vec3 | None = None, listener_rotation: Vec3 | None = None) -> tuple[float, float]:
@@ -494,18 +513,8 @@ def _listener_right(rotation: Vec3) -> tuple[float, float]:
 
 
 def _world_position(entity: Any | None) -> Vec3:
-    if entity is None:
-        return Vec3()
-    matrix = entity.transform.world_matrix(entity)
-    return Vec3(matrix[3], matrix[7], matrix[11])
+    return transform_world_position(entity)
 
 
 def _world_rotation(entity: Any | None) -> Vec3:
-    rotation = Vec3()
-    current = entity
-    while current is not None:
-        rotation.x += current.transform.rotation.x
-        rotation.y += current.transform.rotation.y
-        rotation.z += current.transform.rotation.z
-        current = current.parent
-    return rotation
+    return transform_world_rotation(entity)

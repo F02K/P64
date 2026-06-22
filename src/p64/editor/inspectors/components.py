@@ -19,9 +19,10 @@ from p64.editor.panels.inspector import missing_reference_summary
 from p64.editor.utils.ui import make_widget_compact
 from p64.engine.assets import AssetMetadata, discover_metadata, model_meshes, resolve_model_mesh
 from p64.engine.audio import audio_info
+from p64.engine.builtin import PARTICLE_MATERIAL_RELATIVE, SPRITE_MATERIAL_RELATIVE, UI_IMAGE_MATERIAL_RELATIVE
 from p64.engine.collision import apply_mesh_primitive_defaults
-from p64.engine.components import AudioListener, AudioSource, Camera, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, ScriptEntry, SpawnPoint
-from p64.engine.entity import ENTITY, GAME_OBJECT, Entity, set_object_type_recursive
+from p64.engine.components import AudioListener, AudioSource, Camera, Canvas, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ModelRenderer, ParticleEmitter, RectTransform, ScriptComponent, ScriptEntry, SpawnPoint, SpriteRenderer, UIImage, UIText
+from p64.engine.entity import ENTITY, GAME_OBJECT, Entity, entity_effectively_active, set_object_type_recursive
 from p64.engine.files import is_metadata_file
 from p64.engine.files import find_metadata_for_source
 from p64.engine.material import MaterialAsset, is_material_file, load_material_metadata, material_asset_id, resolve_material_reference
@@ -33,6 +34,12 @@ from p64.engine.validation import entity_reference_errors
 
 AVAILABLE_COMPONENTS = (
     "MeshRenderer",
+    "ModelRenderer",
+    "SpriteRenderer",
+    "Canvas",
+    "UIImage",
+    "UIText",
+    "ParticleEmitter",
     "AudioSource",
     "AudioListener",
     "Camera",
@@ -46,11 +53,24 @@ AVAILABLE_COMPONENTS = (
 )
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp"}
+FONT_SUFFIXES = {".ttf", ".otf", ".ttc"}
 
 
 def component_summary(component: object) -> str:
     if isinstance(component, MeshRenderer):
         return f"MeshRenderer: {component.mesh}"
+    if isinstance(component, ModelRenderer):
+        return f"ModelRenderer: {component.model}"
+    if isinstance(component, SpriteRenderer):
+        return f"SpriteRenderer: {component.texture}"
+    if isinstance(component, Canvas):
+        return f"Canvas: order={component.sort_order}"
+    if isinstance(component, UIImage):
+        return f"UIImage: {component.texture}"
+    if isinstance(component, UIText):
+        return f"UIText: {component.text}"
+    if isinstance(component, ParticleEmitter):
+        return f"ParticleEmitter: rate={component.rate}"
     if isinstance(component, Camera):
         return f"Camera: fov={component.fov} active={component.active}"
     if isinstance(component, Light):
@@ -92,6 +112,16 @@ def texture_image_paths(project: Any) -> list[Path]:
             continue
         images.extend(path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES)
     return sorted(images, key=lambda path: path.relative_to(project.root).as_posix().lower())
+
+
+def font_asset_paths(project: Any) -> list[Path]:
+    roots = [project.assets_dir, project.packages_dir]
+    fonts: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        fonts.extend(path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in FONT_SUFFIXES)
+    return sorted(fonts, key=lambda path: path.relative_to(project.root).as_posix().lower())
 
 
 def project_texture_reference(project: Any, path: Path) -> str:
@@ -145,6 +175,8 @@ def create_inspector_mixin(
         def _add_component_from_menu(self, component_name: str) -> None:
             if component_name == "MeshRenderer":
                 self._add_mesh_renderer()
+            elif component_name == "ModelRenderer":
+                self._add_model_renderer()
             elif component_name == "AudioSource":
                 self._add_audio_source()
             elif component_name == "Fog":
@@ -175,6 +207,18 @@ def create_inspector_mixin(
                     self._add_script_component_editor(component)
                 elif isinstance(component, MeshRenderer):
                     self._add_mesh_renderer_editor(component)
+                elif isinstance(component, ModelRenderer):
+                    self._add_model_renderer_editor(component)
+                elif isinstance(component, SpriteRenderer):
+                    self._add_sprite_renderer_editor(component)
+                elif isinstance(component, Canvas):
+                    self._add_canvas_editor(component)
+                elif isinstance(component, UIImage):
+                    self._add_ui_image_editor(component)
+                elif isinstance(component, UIText):
+                    self._add_ui_text_editor(component)
+                elif isinstance(component, ParticleEmitter):
+                    self._add_particle_emitter_editor(component)
                 elif isinstance(component, Fog):
                     self._add_fog_editor(component)
                 elif isinstance(component, Camera):
@@ -197,7 +241,7 @@ def create_inspector_mixin(
                     self.inspector_layout.addWidget(QLabel(component_summary(component), self.inspector))
             self._add_component_controls()
             for component in self.selected.components:
-                if isinstance(component, MeshRenderer):
+                if isinstance(component, (MeshRenderer, ModelRenderer)):
                     self._add_material_slots_editor(component)
             self.inspector_layout.addStretch(1)
 
@@ -330,6 +374,10 @@ def create_inspector_mixin(
 
             row.addWidget(active)
             row.addWidget(name, 1)
+            if self.selected.active and not entity_effectively_active(self.selected):
+                inherited = QLabel("Inherited inactive", self.inspector)
+                inherited.setStyleSheet("color: #9a9a9a;")
+                row.addWidget(inherited)
             row.addWidget(persist)
             row.addWidget(object_type)
             self.inspector_layout.addWidget(header)
@@ -362,6 +410,9 @@ def create_inspector_mixin(
         def _add_transform_editor(self) -> None:
             if not self.selected:
                 return
+            if self.selected.rect_transform is not None:
+                self._add_rect_transform_editor()
+                return
             transform = self.selected.transform
             content = QWidget(self.inspector)
             form = QFormLayout(content)
@@ -373,6 +424,30 @@ def create_inspector_mixin(
             reset.clicked.connect(self._reset_transform)
             form.addRow("Reset", reset)
             self.inspector_layout.addWidget(self._foldout_panel("Transform", f"{self.selected.id}:Transform", content))
+
+        def _add_rect_transform_editor(self) -> None:
+            if not self.selected or self.selected.rect_transform is None:
+                return
+            rect = self.selected.rect_transform
+            content = QWidget(self.inspector)
+            form = QFormLayout(content)
+            form.setContentsMargins(8, 6, 8, 8)
+            anchor = QComboBox(content)
+            anchor.addItems(["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"])
+            anchor.setCurrentText(rect.anchor)
+            anchor.currentTextChanged.connect(lambda value: self._set_text_value(rect, "anchor", value))
+            reset = QPushButton("Reset Rect", content)
+            reset.clicked.connect(self._reset_rect_transform)
+            hint = QLabel("Size is the outer UI bounds used by UIImage and UIText.", content)
+            hint.setStyleSheet("color: #9a9a9a;")
+            hint.setWordWrap(True)
+            form.addRow("Anchor", anchor)
+            form.addRow("Position", self._vec3_editor(rect.offset))
+            form.addRow("Size", self._vec3_editor(rect.size))
+            form.addRow("Pivot", self._vec3_editor(rect.pivot))
+            form.addRow("Bounds", hint)
+            form.addRow("Reset", reset)
+            self.inspector_layout.addWidget(self._foldout_panel("Rect Transform", f"{self.selected.id}:RectTransform", content))
 
         def _add_script_component_editor(self, component: ScriptComponent) -> None:
             content = QWidget(self.inspector)
@@ -426,6 +501,212 @@ def create_inspector_mixin(
             split_button.clicked.connect(lambda: self._split_mesh_renderer(component))
             form.addRow("Sub-objects", split_button)
             self.inspector_layout.addWidget(self._component_panel(component, "MeshRenderer", content))
+
+        def _add_model_renderer_editor(self, component: ModelRenderer) -> None:
+            content, form = self._component_content_widget()
+            visible = QCheckBox(content)
+            visible.setChecked(component.visible)
+            visible.toggled.connect(lambda checked: self._set_mesh_visible(component, checked))
+            static_batching = QCheckBox(content)
+            static_batching.setChecked(component.static_batching)
+            static_batching.toggled.connect(lambda checked: self._set_bool_value(component, "static_batching", checked))
+
+            model_choices = self._mesh_choices()
+            model_combo = self._search_combo([label for label, _metadata in model_choices])
+            model_id_to_label = {metadata.id: label for label, metadata in model_choices}
+            label_to_metadata = dict(model_choices)
+            model_combo.setCurrentText(model_id_to_label.get(component.model, component.model))
+            model_combo.currentTextChanged.connect(lambda text: self._set_model_from_label(component, text, label_to_metadata))
+
+            shader_choices = self._shader_choices()
+            shader_combo = self._search_combo(["Default"] + [label for label, _shader_id in shader_choices])
+            shader_label_by_id = {shader_id: label for label, shader_id in shader_choices}
+            shader_label_to_id = dict(shader_choices)
+            shader_combo.setCurrentText(shader_label_by_id.get(component.shader or "", "Default"))
+            shader_combo.currentTextChanged.connect(lambda text: self._set_mesh_shader(component, text, shader_label_to_id))
+
+            form.addRow("Visible", visible)
+            form.addRow("Model", model_combo)
+            form.addRow("Shader", shader_combo)
+            form.addRow("Static Batching", static_batching)
+            source_materials = self._source_materials_for_component(component)
+            source_label = QLabel(", ".join(source_materials) or "None", content)
+            source_label.setWordWrap(True)
+            form.addRow("Source Materials", source_label)
+            texture_label = QLabel(self._texture_summary(component), content)
+            texture_label.setWordWrap(True)
+            form.addRow("Texture", texture_label)
+            pixmap = self._texture_pixmap(component)
+            if pixmap:
+                preview = QLabel(content)
+                preview.setPixmap(pixmap)
+                form.addRow("Preview", preview)
+            split_button = QPushButton("Split Into Child GameObjects", content)
+            split_button.clicked.connect(lambda: self._split_mesh_renderer(component))
+            form.addRow("Sub-objects", split_button)
+            self.inspector_layout.addWidget(self._component_panel(component, "ModelRenderer", content))
+
+        def _add_sprite_renderer_editor(self, component: SpriteRenderer) -> None:
+            content, form = self._component_content_widget()
+            alpha = QLineEdit(str(component.alpha), content)
+            order = QLineEdit(str(component.sorting_order), content)
+            billboard = QComboBox(content)
+            billboard.addItems(["camera", "none"])
+            billboard.setCurrentText(component.billboard)
+            alpha.editingFinished.connect(lambda: self._apply_float(alpha, component, "alpha"))
+            order.editingFinished.connect(lambda: self._apply_int(order, component, "sorting_order"))
+            billboard.currentTextChanged.connect(lambda value: self._set_text_value(component, "billboard", value))
+            form.addRow("Texture", self._component_texture_editor(component, "texture"))
+            form.addRow("Material", self._component_material_editor(component))
+            form.addRow("Color", self._color_editor(component.color, lambda values: self._set_vec3_color(component.color, values)))
+            form.addRow("Alpha", alpha)
+            form.addRow("Size", self._vec3_editor(component.size))
+            form.addRow("Pivot", self._vec3_editor(component.pivot))
+            form.addRow("Billboard", billboard)
+            form.addRow("Sorting Order", order)
+            self._add_flipbook_rows(form, content, component)
+            self.inspector_layout.addWidget(self._component_panel(component, "SpriteRenderer", content))
+
+        def _add_canvas_editor(self, component: Canvas) -> None:
+            content, form = self._component_content_widget()
+            order = QLineEdit(str(component.sort_order), content)
+            resolution_mode = QComboBox(content)
+            resolution_mode.addItems(["auto", "fixed"])
+            resolution_mode.setCurrentText(component.resolution_mode if component.resolution_mode in {"auto", "fixed"} else "auto")
+            order.editingFinished.connect(lambda: self._apply_int(order, component, "sort_order"))
+            resolution_mode.currentTextChanged.connect(lambda value: self._set_text_value(component, "resolution_mode", value))
+            form.addRow("Sort Order", order)
+            form.addRow("Resolution Mode", resolution_mode)
+            form.addRow("Reference Resolution", self._vec3_editor(component.reference_resolution))
+            self.inspector_layout.addWidget(self._component_panel(component, "Canvas", content))
+
+        def _add_ui_image_editor(self, component: UIImage) -> None:
+            content, form = self._component_content_widget()
+            alpha = QLineEdit(str(component.alpha), content)
+            anchor = QComboBox(content)
+            anchor.addItems(["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"])
+            anchor.setCurrentText(component.anchor)
+            fill_mode = QComboBox(content)
+            fill_labels = {"Stretch": "stretch", "Fit": "fit", "Fill": "fill"}
+            fill_mode.addItems(list(fill_labels))
+            current_fill = component.fill_mode if component.fill_mode in {"stretch", "fit", "fill"} else "stretch"
+            fill_mode.setCurrentText(next((label for label, value in fill_labels.items() if value == current_fill), "Stretch"))
+            alpha.editingFinished.connect(lambda: self._apply_float(alpha, component, "alpha"))
+            anchor.currentTextChanged.connect(lambda value: self._set_text_value(component, "anchor", value))
+            fill_mode.currentTextChanged.connect(lambda value: self._set_text_value(component, "fill_mode", fill_labels.get(value, "stretch")))
+            form.addRow("Texture", self._component_texture_editor(component, "texture"))
+            form.addRow("Material", self._component_material_editor(component))
+            form.addRow("Color", self._color_editor(component.color, lambda values: self._set_vec3_color(component.color, values)))
+            form.addRow("Alpha", alpha)
+            form.addRow("Size", self._vec3_editor(component.size))
+            form.addRow("Fill Mode", fill_mode)
+            form.addRow("Anchor", anchor)
+            form.addRow("Offset", self._vec3_editor(component.offset))
+            form.addRow("Pivot", self._vec3_editor(component.pivot))
+            self._add_flipbook_rows(form, content, component)
+            self.inspector_layout.addWidget(self._component_panel(component, "UIImage", content))
+
+        def _add_ui_text_editor(self, component: UIText) -> None:
+            content, form = self._component_content_widget()
+            text = QLineEdit(component.text, content)
+            size = QLineEdit(str(component.font_size), content)
+            alpha = QLineEdit(str(component.alpha), content)
+            anchor = QComboBox(content)
+            anchor.addItems(["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"])
+            anchor.setCurrentText(component.anchor)
+            align = QComboBox(content)
+            align.addItems(["left", "center", "right"])
+            align.setCurrentText(component.alignment)
+            font_source = QComboBox(content)
+            font_source.addItems(["System Font", "Font Asset"])
+            font_source.setCurrentText("Font Asset" if component.font_source == "asset" else "System Font")
+            font_family_editor = self._font_family_editor(component)
+            font_asset_editor = self._font_asset_editor(component)
+
+            def set_font_source(value: str) -> None:
+                source = "asset" if value == "Font Asset" else "system"
+                self._set_text_value(component, "font_source", source)
+                font_family_editor.setEnabled(source == "system")
+                font_asset_editor.setEnabled(source == "asset")
+
+            font_family_editor.setEnabled(component.font_source != "asset")
+            font_asset_editor.setEnabled(component.font_source == "asset")
+            text.editingFinished.connect(lambda: self._apply_text(text, component, "text"))
+            size.editingFinished.connect(lambda: self._apply_float(size, component, "font_size"))
+            alpha.editingFinished.connect(lambda: self._apply_float(alpha, component, "alpha"))
+            anchor.currentTextChanged.connect(lambda value: self._set_text_value(component, "anchor", value))
+            align.currentTextChanged.connect(lambda value: self._set_text_value(component, "alignment", value))
+            font_source.currentTextChanged.connect(set_font_source)
+            form.addRow("Text", text)
+            form.addRow("Font Source", font_source)
+            form.addRow("Font Family", font_family_editor)
+            form.addRow("Bitmap Font", font_asset_editor)
+            form.addRow("Font Size", size)
+            form.addRow("Color", self._color_editor(component.color, lambda values: self._set_vec3_color(component.color, values)))
+            form.addRow("Alpha", alpha)
+            form.addRow("Anchor", anchor)
+            form.addRow("Offset", self._vec3_editor(component.offset))
+            form.addRow("Pivot", self._vec3_editor(component.pivot))
+            form.addRow("Alignment", align)
+            self.inspector_layout.addWidget(self._component_panel(component, "UIText", content))
+
+        def _add_particle_emitter_editor(self, component: ParticleEmitter) -> None:
+            content, form = self._component_content_widget()
+            max_particles = QLineEdit(str(component.max_particles), content)
+            rate = QLineEdit(str(component.rate), content)
+            burst = QLineEdit(str(component.burst), content)
+            lifetime = QLineEdit(str(component.lifetime), content)
+            start_size = QLineEdit(str(component.start_size), content)
+            start_alpha = QLineEdit(str(component.start_alpha), content)
+            blend = QComboBox(content)
+            blend.addItems(["alpha", "additive"])
+            blend.setCurrentText(component.blend_mode)
+            looping = QCheckBox(content)
+            looping.setChecked(component.looping)
+            local_space = QCheckBox(content)
+            local_space.setChecked(component.local_space)
+            max_particles.editingFinished.connect(lambda: self._apply_int(max_particles, component, "max_particles"))
+            rate.editingFinished.connect(lambda: self._apply_float(rate, component, "rate"))
+            burst.editingFinished.connect(lambda: self._apply_int(burst, component, "burst"))
+            lifetime.editingFinished.connect(lambda: self._apply_float(lifetime, component, "lifetime"))
+            start_size.editingFinished.connect(lambda: self._apply_float(start_size, component, "start_size"))
+            start_alpha.editingFinished.connect(lambda: self._apply_float(start_alpha, component, "start_alpha"))
+            blend.currentTextChanged.connect(lambda value: self._set_text_value(component, "blend_mode", value))
+            looping.toggled.connect(lambda checked: self._set_bool_value(component, "looping", checked))
+            local_space.toggled.connect(lambda checked: self._set_bool_value(component, "local_space", checked))
+            form.addRow("Texture", self._component_texture_editor(component, "texture"))
+            form.addRow("Material", self._component_material_editor(component))
+            form.addRow("Max Particles", max_particles)
+            form.addRow("Rate", rate)
+            form.addRow("Burst", burst)
+            form.addRow("Lifetime", lifetime)
+            form.addRow("Start Size", start_size)
+            form.addRow("Start Color", self._color_editor(component.start_color, lambda values: self._set_vec3_color(component.start_color, values)))
+            form.addRow("Start Alpha", start_alpha)
+            form.addRow("Start Velocity", self._vec3_editor(component.start_velocity))
+            form.addRow("Gravity", self._vec3_editor(component.gravity))
+            form.addRow("Local Space", local_space)
+            form.addRow("Looping", looping)
+            form.addRow("Blend", blend)
+            self._add_flipbook_rows(form, content, component)
+            self.inspector_layout.addWidget(self._component_panel(component, "ParticleEmitter", content))
+
+        def _add_flipbook_rows(self, form: Any, content: Any, component: Any) -> None:
+            columns = QLineEdit(str(component.flipbook_columns), content)
+            rows = QLineEdit(str(component.flipbook_rows), content)
+            fps = QLineEdit(str(component.flipbook_fps), content)
+            start = QLineEdit(str(component.flipbook_start), content)
+            end = QLineEdit(str(component.flipbook_end), content)
+            columns.editingFinished.connect(lambda: self._apply_int(columns, component, "flipbook_columns"))
+            rows.editingFinished.connect(lambda: self._apply_int(rows, component, "flipbook_rows"))
+            fps.editingFinished.connect(lambda: self._apply_float(fps, component, "flipbook_fps"))
+            start.editingFinished.connect(lambda: self._apply_int(start, component, "flipbook_start"))
+            end.editingFinished.connect(lambda: self._apply_int(end, component, "flipbook_end"))
+            form.addRow("Flipbook Columns", columns)
+            form.addRow("Flipbook Rows", rows)
+            form.addRow("Flipbook FPS", fps)
+            form.addRow("Flipbook Start", start)
+            form.addRow("Flipbook End", end)
 
         def _add_obj_asset_inspector(self, path: Path) -> None:
             if not self.project:
@@ -610,7 +891,7 @@ def create_inspector_mixin(
             prop_box.setLayout(prop_form)
             layout.addWidget(prop_box)
 
-        def _add_material_slots_editor(self, component: MeshRenderer) -> None:
+        def _add_material_slots_editor(self, component: MeshRenderer | ModelRenderer) -> None:
             content = QWidget(self.inspector)
             layout = QVBoxLayout(content)
             layout.setContentsMargins(8, 6, 8, 8)
@@ -1090,6 +1371,16 @@ def create_inspector_mixin(
                 return
             if isinstance(component, MeshRenderer):
                 replacement = MeshRenderer()
+            elif isinstance(component, SpriteRenderer):
+                replacement = SpriteRenderer(material=SPRITE_MATERIAL_RELATIVE)
+            elif isinstance(component, Canvas):
+                replacement = Canvas()
+            elif isinstance(component, UIImage):
+                replacement = UIImage(material=UI_IMAGE_MATERIAL_RELATIVE)
+            elif isinstance(component, UIText):
+                replacement = UIText()
+            elif isinstance(component, ParticleEmitter):
+                replacement = ParticleEmitter(material=PARTICLE_MATERIAL_RELATIVE)
             elif isinstance(component, Camera):
                 replacement = Camera()
             elif isinstance(component, Light):
@@ -1135,6 +1426,14 @@ def create_inspector_mixin(
             self._populate_inspector()
             self.viewport.update()
 
+        def _reset_rect_transform(self) -> None:
+            if not self.selected:
+                return
+            self.selected.rect_transform = RectTransform()
+            self._mark_dirty()
+            self._populate_inspector()
+            self.viewport.update()
+
         def _rename_selected(self, value: str) -> None:
             if self.selected:
                 self.selected.name = value or self.selected.name
@@ -1146,6 +1445,8 @@ def create_inspector_mixin(
             if self.selected:
                 self.selected.active = checked
                 self._mark_dirty()
+                self._populate_hierarchy()
+                self._populate_inspector()
                 self.viewport.update()
 
         def _set_selected_persistent(self, checked: bool) -> None:
@@ -1326,10 +1627,51 @@ def create_inspector_mixin(
             self._mark_dirty()
             self.viewport.update()
 
+        def _apply_int(self, edit: Any, target: Any, name: str) -> None:
+            try:
+                value = int(float(edit.text()))
+            except ValueError:
+                self._log(f"Invalid number: {edit.text()}")
+                return
+            setattr(target, name, value)
+            self._mark_dirty()
+            self.viewport.update()
+
         def _apply_text(self, edit: Any, target: Any, name: str) -> None:
             setattr(target, name, edit.text())
             self._mark_dirty()
             self.viewport.update()
+
+        def _apply_optional_text(self, edit: Any, target: Any, name: str) -> None:
+            value = edit.text().strip()
+            setattr(target, name, value or None)
+            self._mark_dirty()
+            self.viewport.update()
+
+        def _set_asset_reference(self, target: Any, name: str, value: str, optional: bool = False) -> None:
+            text = value.strip()
+            setattr(target, name, (text or None) if optional else text)
+            self._mark_dirty()
+            self.viewport.reload_assets()
+
+        def _set_text_value(self, target: Any, name: str, value: str) -> None:
+            setattr(target, name, value)
+            self._mark_dirty()
+            self.viewport.update()
+
+        def _set_bool_value(self, target: Any, name: str, value: bool) -> None:
+            setattr(target, name, bool(value))
+            self._mark_dirty()
+            self.viewport.update()
+
+        def _set_component_material(self, component: Any, label: str, label_to_id: dict[str, str]) -> None:
+            if label == "None":
+                value = None
+            else:
+                value = label_to_id.get(label, label)
+            setattr(component, "material", value)
+            self._mark_dirty()
+            self.viewport.reload_assets()
 
         def _add_mesh_renderer(self) -> None:
             if not self.selected:
@@ -1343,6 +1685,20 @@ def create_inspector_mixin(
                 source_materials = [str(item) for item in mesh_entry.get("material_slots", [])]
                 component.material = source_materials[0] if source_materials else None
                 self._sync_mesh_materials(component, metadata)
+            self.selected.add_component(component)
+            self._mark_dirty()
+            self._populate_inspector()
+            self.viewport.reload_assets()
+
+        def _add_model_renderer(self) -> None:
+            if not self.selected:
+                return
+            choices = self._mesh_choices()
+            component = ModelRenderer()
+            if choices:
+                _label, metadata = choices[0]
+                component.model = metadata.id
+                self._sync_model_materials(component, metadata)
             self.selected.add_component(component)
             self._mark_dirty()
             self._populate_inspector()
@@ -1508,14 +1864,20 @@ def create_inspector_mixin(
             metadata, _mesh = resolve_model_mesh(metadata_by_id, mesh_id)
             return metadata
 
+        def _metadata_for_model(self, model_id: str) -> AssetMetadata | None:
+            return next((metadata for _label, metadata in self._mesh_choices() if metadata.id == model_id), None)
+
         def _mesh_entry_for_component(self, component: MeshRenderer) -> dict[str, Any] | None:
             metadata_by_id = {metadata.id: metadata for _label, metadata in self._mesh_choices()}
             _metadata, mesh = resolve_model_mesh(metadata_by_id, component.mesh, component.submesh)
             return mesh
 
-        def _source_materials_for_component(self, component: MeshRenderer) -> list[str]:
+        def _source_materials_for_component(self, component: MeshRenderer | ModelRenderer) -> list[str]:
             if component.source_materials:
                 return list(component.source_materials)
+            if isinstance(component, ModelRenderer):
+                metadata = self._metadata_for_model(component.model)
+                return list(metadata.materials) if metadata else []
             mesh_entry = self._mesh_entry_for_component(component)
             if mesh_entry:
                 return [str(item) for item in mesh_entry.get("material_slots", [])]
@@ -1528,6 +1890,17 @@ def create_inspector_mixin(
             metadata = metadata or self._metadata_for_mesh(component.mesh)
             mesh_entry = self._mesh_entry_for_component(component)
             component.source_materials = [str(item) for item in mesh_entry.get("material_slots", [])] if mesh_entry else (list(metadata.materials) if metadata else [])
+            material_assets = metadata.settings.get("material_assets", {}) if metadata else {}
+            slots: list[str | None] = []
+            for index, material in enumerate(component.source_materials):
+                existing = component.material_slots[index] if index < len(component.material_slots) else None
+                mapped = material_assets.get(material) if isinstance(material_assets, dict) else None
+                slots.append(existing or (str(mapped) if mapped else None))
+            component.material_slots = slots
+
+        def _sync_model_materials(self, component: ModelRenderer, metadata: AssetMetadata | None = None) -> None:
+            metadata = metadata or self._metadata_for_model(component.model)
+            component.source_materials = list(metadata.materials) if metadata else []
             material_assets = metadata.settings.get("material_assets", {}) if metadata else {}
             slots: list[str | None] = []
             for index, material in enumerate(component.source_materials):
@@ -1582,17 +1955,29 @@ def create_inspector_mixin(
             self._mark_dirty()
             self.viewport.reload_assets()
 
+        def _set_model_from_label(self, component: ModelRenderer, label: str, label_to_metadata: dict[str, AssetMetadata]) -> None:
+            metadata = label_to_metadata.get(label)
+            if metadata is None:
+                metadata = next((candidate for _label, candidate in self._mesh_choices() if candidate.id == label), None)
+            if metadata is None:
+                return
+            component.model = metadata.id
+            self._sync_model_materials(component, metadata)
+            self._mark_dirty()
+            self._populate_inspector()
+            self.viewport.reload_assets()
+
         def _set_audio_clip(self, component: AudioSource, label: str, label_to_id: dict[str, str]) -> None:
             component.clip = "" if label == "None" else label_to_id.get(label, label)
             self._mark_dirty()
             self.viewport.reload_assets()
 
-        def _set_mesh_shader(self, component: MeshRenderer, label: str, label_to_id: dict[str, str]) -> None:
-            component.shader = normalize_shader_id(label_to_id.get(label))
+        def _set_mesh_shader(self, component: MeshRenderer | ModelRenderer, label: str, label_to_id: dict[str, str]) -> None:
+            component.shader = normalize_shader_id(label_to_id.get(label)) if label != "Default" else None
             self._mark_dirty()
             self.viewport.reload_assets()
 
-        def _set_material_slot(self, component: MeshRenderer, index: int, label: str, label_to_id: dict[str, str]) -> None:
+        def _set_material_slot(self, component: MeshRenderer | ModelRenderer, index: int, label: str, label_to_id: dict[str, str]) -> None:
             while len(component.material_slots) <= index:
                 component.material_slots.append(None)
             component.material_slots[index] = label_to_id.get(label) if label != "None" else None
@@ -1632,6 +2017,95 @@ def create_inspector_mixin(
             material.textures[name] = text
             material.save(path)
             self.viewport.reload_assets()
+
+        def _component_texture_editor(self, component: Any, name: str) -> Any:
+            row = QWidget(self.inspector)
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+            preview = QLabel(row)
+            preview.setFixedSize(34, 34)
+            preview.setStyleSheet("border: 1px solid #111; background: #202124;")
+            edit = QLineEdit(str(getattr(component, name, "") or ""), row)
+            pick = QPushButton("Pick", row)
+
+            def refresh_preview() -> None:
+                pixmap = self._texture_pixmap_for_reference(edit.text(), 32)
+                if pixmap is None:
+                    preview.clear()
+                    preview.setText("")
+                else:
+                    preview.setPixmap(pixmap)
+
+            def apply_value() -> None:
+                self._set_asset_reference(component, name, edit.text())
+                refresh_preview()
+
+            def choose() -> None:
+                selected = self._choose_texture_reference(edit.text())
+                if selected is None:
+                    return
+                edit.setText(selected)
+                apply_value()
+
+            edit.editingFinished.connect(apply_value)
+            pick.clicked.connect(choose)
+            layout.addWidget(preview)
+            layout.addWidget(edit, 1)
+            layout.addWidget(pick)
+            refresh_preview()
+            return row
+
+        def _component_material_editor(self, component: Any) -> Any:
+            choices = self._material_choices()
+            labels = ["None"] + [label for label, _path in choices]
+            label_by_id = {material_id: label for label, material_id in choices}
+            label_to_id = dict(choices)
+            combo = self._search_combo(labels)
+            current = getattr(component, "material", None)
+            combo.setCurrentText(label_by_id.get(current or "", current or "None"))
+            combo.currentTextChanged.connect(lambda text: self._set_component_material(component, text, label_to_id))
+            return combo
+
+        def _font_asset_editor(self, component: UIText) -> Any:
+            row = QWidget(self.inspector)
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+            edit = QLineEdit(component.bitmap_font, row)
+            pick = QPushButton("Pick", row)
+
+            def apply_value() -> None:
+                self._set_asset_reference(component, "bitmap_font", edit.text())
+
+            def choose() -> None:
+                selected = self._choose_font_reference(edit.text())
+                if selected is None:
+                    return
+                edit.setText(selected)
+                apply_value()
+
+            edit.editingFinished.connect(apply_value)
+            pick.clicked.connect(choose)
+            layout.addWidget(edit, 1)
+            layout.addWidget(pick)
+            return row
+
+        def _font_family_editor(self, component: UIText) -> Any:
+            combo = QComboBox(self.inspector)
+            combo.setEditable(True)
+            combo.addItem("System")
+            try:
+                from PySide6.QtGui import QFontDatabase
+
+                for family in sorted(QFontDatabase.families(), key=str.lower):
+                    if family != "System":
+                        combo.addItem(family)
+            except Exception as exc:
+                self._log(f"Font family picker unavailable: {exc}")
+            combo.setCurrentText(component.font_family or "System")
+            combo.currentTextChanged.connect(lambda value: self._set_text_value(component, "font_family", value or "System"))
+            return combo
 
         def _texture_editor(self, path: Path, material: MaterialAsset, name: str, value: str) -> Any:
             row = QWidget(self.inspector)
@@ -1732,6 +2206,39 @@ def create_inspector_mixin(
             item = grid.currentItem()
             return str(item.data(Qt.UserRole)) if item else None
 
+        def _choose_font_reference(self, current: str = "") -> str | None:
+            if not self.project:
+                return None
+            try:
+                from PySide6.QtWidgets import QDialog, QDialogButtonBox, QListWidget, QListWidgetItem, QVBoxLayout
+            except Exception as exc:
+                self._log(f"Font picker unavailable: {exc}")
+                return None
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Pick Font")
+            layout = QVBoxLayout(dialog)
+            list_widget = QListWidget(dialog)
+            current_path = self._resolve_texture_reference(current)
+            for font_path in font_asset_paths(self.project):
+                reference = project_texture_reference(self.project, font_path)
+                item = QListWidgetItem(font_path.name)
+                item.setToolTip(reference)
+                item.setData(Qt.UserRole, reference)
+                list_widget.addItem(item)
+                if current_path and font_path.resolve() == current_path.resolve():
+                    list_widget.setCurrentItem(item)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            list_widget.itemDoubleClicked.connect(lambda _item: dialog.accept())
+            layout.addWidget(list_widget)
+            layout.addWidget(buttons)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            item = list_widget.currentItem()
+            return str(item.data(Qt.UserRole)) if item else None
+
         def _reset_material(self, path: Path) -> None:
             if not self.project:
                 return
@@ -1789,10 +2296,10 @@ def create_inspector_mixin(
                     pass
             return self.project.assets_dir / "materials" / path.stem
 
-        def _split_mesh_renderer(self, component: MeshRenderer) -> None:
+        def _split_mesh_renderer(self, component: MeshRenderer | ModelRenderer) -> None:
             if not self.selected:
                 return
-            metadata = self._metadata_for_mesh(component.mesh)
+            metadata = self._metadata_for_model(component.model) if isinstance(component, ModelRenderer) else self._metadata_for_mesh(component.mesh)
             if not metadata:
                 self._log("No mesh metadata found for split.")
                 return
@@ -1816,12 +2323,15 @@ def create_inspector_mixin(
             return choices
 
         def _material_choices(self) -> list[tuple[str, str]]:
-            if not self.project or not self.project.assets_dir.exists():
+            if not self.project:
                 return []
             choices: list[tuple[str, str]] = []
-            for path in self.project.assets_dir.rglob("*.material"):
-                material_id = material_asset_id(self.project.root, path)
-                choices.append((f"{path.stem}  ({material_id})", material_id))
+            for root in [self.project.assets_dir, self.project.packages_dir]:
+                if not root.exists():
+                    continue
+                for path in root.rglob("*.material"):
+                    material_id = material_asset_id(self.project.root, path)
+                    choices.append((f"{path.stem}  ({material_id})", material_id))
             return sorted(choices)
 
         def _audio_clip_choices(self) -> list[tuple[str, AssetMetadata]]:
@@ -1840,11 +2350,11 @@ def create_inspector_mixin(
                 choices.append((label, metadata))
             return sorted(choices, key=lambda item: item[0].lower())
 
-        def _texture_summary(self, component: MeshRenderer) -> str:
+        def _texture_summary(self, component: MeshRenderer | ModelRenderer) -> str:
             texture = self._texture_path_for(component)
             return str(texture.relative_to(self.project.root)) if texture and self.project else "No diffuse texture"
 
-        def _texture_pixmap(self, component: MeshRenderer) -> Any | None:
+        def _texture_pixmap(self, component: MeshRenderer | ModelRenderer) -> Any | None:
             texture = self._texture_path_for(component)
             if not texture or not texture.exists():
                 return None
@@ -1853,13 +2363,16 @@ def create_inspector_mixin(
                 return None
             return pixmap.scaled(96, 96, Qt.KeepAspectRatio, Qt.FastTransformation)
 
-        def _texture_path_for(self, component: MeshRenderer) -> Path | None:
+        def _texture_path_for(self, component: MeshRenderer | ModelRenderer) -> Path | None:
             if not self.project:
                 return None
-            metadata = self._metadata_for_mesh(component.mesh)
+            metadata = self._metadata_for_model(component.model) if isinstance(component, ModelRenderer) else self._metadata_for_mesh(component.mesh)
             if not metadata:
                 return None
-            material = component.material
+            material = None if isinstance(component, ModelRenderer) else component.material
+            if material is None:
+                source_materials = self._source_materials_for_component(component)
+                material = source_materials[0] if source_materials else None
             material_defs = metadata.settings.get("material_defs", {})
             texture_name = material_defs.get(material, {}).get("diffuse_texture") if material else None
             if not texture_name:
@@ -1872,6 +2385,8 @@ def create_inspector_mixin(
             for component in self.selected.components:
                 if isinstance(component, MeshRenderer) and component.mesh:
                     return component.mesh
-            return "No MeshRenderer"
+                if isinstance(component, ModelRenderer) and component.model:
+                    return component.model
+            return "No MeshRenderer or ModelRenderer"
 
     return InspectorMixin

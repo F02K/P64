@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from math import sqrt
 
 from p64.engine.math import Vec3
+from p64.engine.transforms import set_world_position, set_world_rotation, world_position, world_rotation
 
 
 AXIS_COLORS = {
@@ -40,6 +41,8 @@ class TransformSnapshot:
     position: Vec3
     rotation: Vec3
     scale: Vec3
+    world_position: Vec3
+    world_rotation: Vec3
 
 
 def transform_snapshot(entity: object) -> TransformSnapshot:
@@ -48,6 +51,8 @@ def transform_snapshot(entity: object) -> TransformSnapshot:
         position=Vec3.from_value(transform.position),
         rotation=Vec3.from_value(transform.rotation),
         scale=Vec3.from_value(transform.scale),
+        world_position=world_position(entity),
+        world_rotation=world_rotation(entity),
     )
 
 
@@ -89,13 +94,15 @@ def apply_gizmo_drag(
         if handle == "center":
             right = camera_right or Vec3(1.0, 0.0, 0.0)
             up = camera_up or Vec3(0.0, 1.0, 0.0)
-            transform.position = Vec3(
-                start.position.x + (right.x * dx - up.x * dy) * world_per_pixel,
-                start.position.y + (right.y * dx - up.y * dy) * world_per_pixel,
-                start.position.z + (right.z * dx - up.z * dy) * world_per_pixel,
-            )
+            set_world_position(target, Vec3(
+                start.world_position.x + (right.x * dx - up.x * dy) * world_per_pixel,
+                start.world_position.y + (right.y * dx - up.y * dy) * world_per_pixel,
+                start.world_position.z + (right.z * dx - up.z * dy) * world_per_pixel,
+            ))
             return
-        _set_axis_value(transform.position, handle, _axis_value(start.position, handle) + projected * world_per_pixel)
+        world = start.world_position.copy()
+        _set_axis_value(world, handle, _axis_value(start.world_position, handle) + projected * world_per_pixel)
+        set_world_position(target, world)
     elif tool == "scale":
         amount = (dx - dy) * 0.01 if handle == "center" else projected * 0.01
         if handle == "center":
@@ -105,7 +112,9 @@ def apply_gizmo_drag(
             _set_axis_value(transform.scale, handle, max(0.001, _axis_value(start.scale, handle) + amount))
     elif tool == "rotate":
         axis = _dominant_axis(camera_forward or Vec3(0.0, 0.0, -1.0)) if handle == "center" else handle
-        _set_axis_value(transform.rotation, axis, _axis_value(start.rotation, axis) + projected * 0.5)
+        rotation = start.world_rotation.copy()
+        _set_axis_value(rotation, axis, _axis_value(start.world_rotation, axis) + projected * 0.5)
+        set_world_rotation(target, rotation)
 
 
 def axis_screen_direction(handle: GizmoHandle) -> tuple[float, float]:

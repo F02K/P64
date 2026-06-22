@@ -8,9 +8,10 @@ from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
 from p64.engine.collision import CollisionWorld
-from p64.engine.components import AudioSource, CharacterController, EntityPhysics, ScriptComponent, ScriptEntry, Transform
+from p64.engine.components import AudioSource, CharacterController, EntityPhysics, ParticleEmitter, RectTransform, ScriptComponent, ScriptEntry, SpriteRenderer, Transform, UIImage, UIText
 from p64.engine.input import InputState
 from p64.engine.math import Vec3
+from p64.engine.transforms import world_forward, world_right, world_up
 
 if TYPE_CHECKING:
     from p64.engine.entity import Entity
@@ -32,6 +33,7 @@ class ScriptContext:
 class GameScript:
     entity: Entity
     transform: Transform
+    rect_transform: RectTransform | None
     scene: Scene | None
     project: Project | None
     scene_manager: SceneManager | None
@@ -40,10 +42,15 @@ class GameScript:
     character_controller: CharacterController | None
     entity_physics: EntityPhysics | None
     audio_source: AudioSource | None
+    sprite_renderer: SpriteRenderer | None
+    particle_emitter: ParticleEmitter | None
+    ui_image: UIImage | None
+    ui_text: UIText | None
 
     def __init__(self, entity: Any, context: ScriptContext | None = None, **properties: Any) -> None:
         self.entity = entity
         self.transform = entity.transform
+        self.rect_transform = entity.rect_transform
         self.scene = context.scene if context else None
         self.project = context.project if context else None
         self.scene_manager = context.scene_manager if context else None
@@ -52,6 +59,10 @@ class GameScript:
         self.character_controller = self._find_character_controller()
         self.entity_physics = self._find_entity_physics()
         self.audio_source = self._find_audio_source()
+        self.sprite_renderer = self._find_component(SpriteRenderer)
+        self.particle_emitter = self._find_component(ParticleEmitter)
+        self.ui_image = self._find_component(UIImage)
+        self.ui_text = self._find_component(UIText)
         if self.character_controller is not None and context is not None:
             self.character_controller.bind_runtime(entity, context.scene, context.project, context.collision_world)
         for key, value in properties.items():
@@ -64,6 +75,27 @@ class GameScript:
         if self.scene is None or self.character_controller is None:
             return Vec3()
         return self.character_controller.move(motion, dt)
+
+    @property
+    def forward(self) -> Vec3:
+        return world_forward(self.entity)
+
+    @property
+    def right(self) -> Vec3:
+        return world_right(self.entity)
+
+    @property
+    def up(self) -> Vec3:
+        return world_up(self.entity)
+
+    def world_forward(self) -> Vec3:
+        return self.forward
+
+    def world_right(self) -> Vec3:
+        return self.right
+
+    def world_up(self) -> Vec3:
+        return self.up
 
     def on_start(self) -> None:
         pass
@@ -84,8 +116,11 @@ class GameScript:
         return None
 
     def _find_audio_source(self) -> AudioSource | None:
+        return self._find_component(AudioSource)
+
+    def _find_component(self, component_type: Any) -> Any | None:
         for component in getattr(self.entity, "components", []):
-            if isinstance(component, AudioSource):
+            if isinstance(component, component_type):
                 return component
         return None
 

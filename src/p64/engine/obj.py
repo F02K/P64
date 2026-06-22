@@ -5,11 +5,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from p64.engine.assets import AssetMetadata, model_meshes, safe_model_mesh_id
-from p64.engine.components import MeshRenderer
+from p64.engine.assets import AssetMetadata, safe_model_mesh_id
+from p64.engine.components import ModelRenderer
 from p64.engine.entity import GAME_OBJECT, Entity
 from p64.engine.files import metadata_path_for_source
 from p64.engine.project import Project
+
+
+MODEL_CACHE_VERSION = 1
 
 
 @dataclass
@@ -173,6 +176,7 @@ def import_obj_to_project(project: Project, obj_path: Path, add_to_startup_scene
     settings.update({
         "import_mode": "model",
         "model": model_settings_for_obj(metadata_id, mesh),
+        "model_cache": model_cache_for_obj(metadata_id, mesh, destination),
         "mtllibs": mesh.mtllibs,
         "material_defs": {name: material.to_dict() for name, material in mesh.material_defs.items()},
     })
@@ -189,19 +193,13 @@ def import_obj_to_project(project: Project, obj_path: Path, add_to_startup_scene
     if add_to_startup_scene:
         scene = project.load_startup_scene()
         root = Entity(destination.stem, object_type=GAME_OBJECT)
-        for mesh_entry in model_meshes(metadata):
-            child = Entity(str(mesh_entry.get("name") or "Mesh"), object_type=GAME_OBJECT)
-            source_materials = [str(item) for item in mesh_entry.get("material_slots", [])]
-            material = source_materials[0] if source_materials else None
-            child.add_component(
-                MeshRenderer(
-                    mesh=str(mesh_entry.get("id") or ""),
-                    material=material,
-                    source_materials=source_materials,
-                    material_slots=[None for _material in source_materials],
-                )
+        root.add_component(
+            ModelRenderer(
+                model=metadata.id,
+                source_materials=list(metadata.materials),
+                material_slots=[None for _material in metadata.materials],
             )
-            root.add_child(child)
+        )
         scene.add_entity(root)
         project.save_startup_scene(scene)
 
@@ -256,12 +254,85 @@ def model_settings_for_obj(metadata_id: str, mesh: ObjMesh) -> dict[str, object]
     }
 
 
+def model_source_signature(path: Path) -> dict[str, object]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"size": 0, "mtime_ns": 0}
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def model_cache_for_obj(metadata_id: str, mesh: ObjMesh, source_path: Path) -> dict[str, object]:
+    mesh_entries = model_settings_for_obj(metadata_id, mesh).get("meshes", [])
+    entry_by_group = {
+        str(entry.get("source_group") or entry.get("name") or ""): entry
+        for entry in mesh_entries
+        if isinstance(entry, dict)
+    }
+    grouped: dict[str, dict[str, object]] = {}
+    for group in mesh.groups:
+        entry = entry_by_group.get(group.name)
+        mesh_id = str(entry.get("id") if entry else safe_model_mesh_id(metadata_id, group.name))
+        materials = _group_materials(group) or [""]
+        for material in materials:
+            key = material
+            batch = grouped.setdefault(key, {
+                "material": material or None,
+                "mesh_ids": [],
+                "source_groups": [],
+                "vertex_count": 0,
+                "triangle_count": 0,
+                "bounds": {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]},
+            })
+            batch["mesh_ids"].append(mesh_id)
+            batch["source_groups"].append(group.name)
+            faces = [face for face in group.faces if (face.material or "") == material]
+            batch["triangle_count"] = int(batch["triangle_count"]) + len(faces)
+            batch["vertex_count"] = int(batch["vertex_count"]) + sum(len(face.vertices) for face in faces)
+            batch["bounds"] = _merge_bounds(batch["bounds"], _faces_bounds(faces))
+    return {
+        "version": MODEL_CACHE_VERSION,
+        "source_signature": model_source_signature(source_path),
+        "batch_count": len(grouped),
+        "mesh_count": len(mesh.groups),
+        "material_count": len(mesh.materials),
+        "batches": list(grouped.values()),
+    }
+
+
 def _group_materials(group: ObjGroup) -> list[str]:
     materials: list[str] = []
     for face in group.faces:
         if face.material and face.material not in materials:
             materials.append(face.material)
     return materials
+
+
+def _faces_bounds(faces: list[ObjFace]) -> dict[str, list[float]]:
+    positions = [vertex.position for face in faces for vertex in face.vertices]
+    if not positions:
+        return {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}
+    return {
+        "min": [min(position[index] for position in positions) for index in range(3)],
+        "max": [max(position[index] for position in positions) for index in range(3)],
+    }
+
+
+def _merge_bounds(a: object, b: object) -> dict[str, list[float]]:
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return {"min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]}
+    a_min = a.get("min", [0.0, 0.0, 0.0])
+    a_max = a.get("max", [0.0, 0.0, 0.0])
+    b_min = b.get("min", [0.0, 0.0, 0.0])
+    b_max = b.get("max", [0.0, 0.0, 0.0])
+    if a_min == [0.0, 0.0, 0.0] and a_max == [0.0, 0.0, 0.0]:
+        return {"min": list(b_min), "max": list(b_max)}
+    if b_min == [0.0, 0.0, 0.0] and b_max == [0.0, 0.0, 0.0]:
+        return {"min": list(a_min), "max": list(a_max)}
+    return {
+        "min": [min(float(a_min[index]), float(b_min[index])) for index in range(3)],
+        "max": [max(float(a_max[index]), float(b_max[index])) for index in range(3)],
+    }
 
 
 def _group_bounds(group: ObjGroup) -> dict[str, list[float]]:
@@ -344,17 +415,37 @@ def _copy_material_dependencies(source_obj: Path, destination_obj: Path) -> None
     for mtllib in source_mesh.mtllibs:
         source_mtl = source_obj.parent / mtllib
         destination_mtl = destination_obj.parent / mtllib
+        materials = list(parse_mtl(source_mtl).values())
         if source_mtl.exists() and source_mtl.resolve() != destination_mtl.resolve():
             shutil.copy2(source_mtl, destination_mtl)
-        for material in parse_mtl(source_mtl).values():
+        for material in materials:
             for texture in [material.diffuse_texture, material.specular_texture, material.bump_texture]:
                 if not texture:
                     continue
-                source_texture = source_mtl.parent / texture
-                destination_texture = destination_mtl.parent / texture
+                texture_path = Path(texture)
+                source_texture = texture_path if texture_path.is_absolute() else source_mtl.parent / texture
+                destination_texture = destination_mtl.parent / (source_texture.name if texture_path.is_absolute() else texture)
                 destination_texture.parent.mkdir(parents=True, exist_ok=True)
                 if source_texture.exists() and source_texture.resolve() != destination_texture.resolve():
                     shutil.copy2(source_texture, destination_texture)
+        if destination_mtl.exists():
+            _rewrite_absolute_texture_references(destination_mtl)
+
+
+def _rewrite_absolute_texture_references(mtl_path: Path) -> None:
+    lines: list[str] = []
+    changed = False
+    for raw_line in mtl_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        parts = line.split()
+        if parts and parts[0] in {"map_Kd", "map_Ks", "map_bump", "bump"} and len(parts) >= 2:
+            texture = Path(_texture_name(parts[1:]))
+            if texture.is_absolute() and texture.exists():
+                raw_line = f"{parts[0]} {texture.name}"
+                changed = True
+        lines.append(raw_line)
+    if changed:
+        mtl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _texture_name(values: list[str]) -> str:

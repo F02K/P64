@@ -5,9 +5,10 @@ from math import floor, sqrt
 from typing import Any
 
 from p64.engine.components import CharacterController, Collider, EntityPhysics
-from p64.engine.entity import Entity
+from p64.engine.entity import Entity, entity_effectively_active
 from p64.engine.math import Vec3
-from p64.engine.mesh_geometry import bounds_from_points, convex_hull, ensure_mesh_collision_metadata, mesh_bounds, mesh_renderer_for, mesh_triangles, transform_point, transform_triangle, transformed_bounds
+from p64.engine.mesh_geometry import bounds_from_points, convex_hull, ensure_mesh_collision_metadata, mesh_bounds, render_geometry_for, mesh_triangles, transform_point, transform_triangle, transformed_bounds
+from p64.engine.transforms import world_position
 
 
 @dataclass(slots=True)
@@ -57,7 +58,9 @@ class CollisionWorld:
         self._static_grid: dict[tuple[int, int, int], list[ColliderProxy]] = {}
         self._dynamic_grid: dict[tuple[int, int, int], list[ColliderProxy]] = {}
         self._latest_body_bounds: dict[int, Bounds] = {}
+        self._physics_bodies: list[tuple[Entity, EntityPhysics]] = []
         self._dynamic_cache_valid = False
+        self._build_physics_bodies()
         self._build_static_colliders()
         self.colliders = [*self.static_colliders]
 
@@ -68,9 +71,7 @@ class CollisionWorld:
         dynamic_colliders: list[tuple[Entity, Collider]] = []
         dynamic_proxies: list[ColliderProxy] = []
         dynamic_by_collider: dict[int, ColliderProxy] = {}
-        for entity in self.scene.walk():
-            if not entity.active:
-                continue
+        for entity in self.scene.walk_active():
             if entity.is_game_object:
                 continue
             for component in entity.components:
@@ -92,8 +93,8 @@ class CollisionWorld:
             self._rebuild_dynamic_frame_cache()
 
     def _build_static_colliders(self) -> None:
-        for entity in self.scene.walk():
-            if not entity.active or not entity.is_game_object:
+        for entity in self.scene.walk_active():
+            if not entity.is_game_object:
                 continue
             for component in entity.components:
                 if not isinstance(component, Collider) or not component.enabled:
@@ -105,6 +106,14 @@ class CollisionWorld:
                 self._static_proxies.append(proxy)
                 self._static_proxy_by_collider[id(component)] = proxy
         self._static_grid = _build_grid(self._static_proxies, self.grid_cell_size)
+
+    def _build_physics_bodies(self) -> None:
+        self._physics_bodies = [
+            (entity, physics)
+            for entity in self.scene.walk()
+            for physics in (_entity_physics(entity),)
+            if physics is not None
+        ]
 
     def overlaps(self, entity: Entity, collider: Collider, include_triggers: bool = True) -> list[CollisionHit]:
         self._ensure_frame_cache()
@@ -193,14 +202,11 @@ class CollisionWorld:
 
     def step_physics(self, dt: float) -> None:
         dt = max(float(dt), 0.0)
-        physics_bodies: list[tuple[Entity, EntityPhysics]] = []
-        for entity in self.scene.walk():
-            if not entity.active:
-                continue
-            physics = _entity_physics(entity)
-            if physics is None or not physics.enabled:
-                continue
-            physics_bodies.append((entity, physics))
+        physics_bodies = [
+            (entity, physics)
+            for entity, physics in self._physics_bodies
+            if entity_effectively_active(entity) and physics.enabled
+        ]
         if not physics_bodies:
             return
 
@@ -215,6 +221,9 @@ class CollisionWorld:
             self._step_entity_physics(entity, physics, colliders, dt)
             if needs_collision_cache and colliders:
                 self._update_dynamic_proxies_for(colliders)
+
+    def physics_body_count(self) -> int:
+        return len(self._physics_bodies)
 
     def _step_entity_physics(self, entity: Entity, physics: EntityPhysics, colliders: list[tuple[Entity, Collider]], dt: float) -> None:
         if not entity.is_entity or physics.is_kinematic or dt <= 0.0:
@@ -348,7 +357,7 @@ class CollisionWorld:
         colliders = [
             (owner, component)
             for owner in entity.walk()
-            if owner.active and not owner.is_game_object
+            if entity_effectively_active(owner) and not owner.is_game_object
             for component in owner.components
             if isinstance(component, Collider) and component.enabled
         ]
@@ -369,8 +378,8 @@ class CollisionWorld:
 
 def collider_bounds(entity: Entity, collider: Collider, project: Any | None = None) -> Bounds:
     if project is not None and (collider.fit_to_mesh or collider.shape == "mesh"):
-        renderer = mesh_renderer_for(entity)
-        local_bounds = mesh_bounds(project, renderer) if renderer else None
+        renderer = render_geometry_for(entity)
+        local_bounds = mesh_bounds(project, renderer)
         if local_bounds is not None:
             world_min, world_max = transformed_bounds(entity, local_bounds)
             if collider.shape == "sphere":
@@ -426,8 +435,8 @@ def collider_bounds(entity: Entity, collider: Collider, project: Any | None = No
 
 def collider_sphere(entity: Entity, collider: Collider, project: Any | None = None) -> tuple[Vec3, float]:
     if project is not None and collider.fit_to_mesh:
-        renderer = mesh_renderer_for(entity)
-        local_bounds = mesh_bounds(project, renderer) if renderer else None
+        renderer = render_geometry_for(entity)
+        local_bounds = mesh_bounds(project, renderer)
         if local_bounds is not None:
             world_min, world_max = transformed_bounds(entity, local_bounds)
             center = Vec3(
@@ -462,8 +471,8 @@ def collider_sphere(entity: Entity, collider: Collider, project: Any | None = No
 def apply_mesh_primitive_defaults(project: Any | None, entity: Entity, collider: Collider, shape: str | None = None) -> bool:
     if project is None:
         return False
-    renderer = mesh_renderer_for(entity)
-    local_bounds = mesh_bounds(project, renderer) if renderer else None
+    renderer = render_geometry_for(entity)
+    local_bounds = mesh_bounds(project, renderer)
     if local_bounds is None:
         return False
     mins, maxs = local_bounds
@@ -491,7 +500,7 @@ def apply_mesh_primitive_defaults(project: Any | None, entity: Entity, collider:
 
 
 def controller_bounds(entity: Entity, controller: CharacterController) -> Bounds:
-    position = entity.transform.position
+    position = world_position(entity)
     radius = max(controller.radius - controller.skin_width, 0.001)
     height = max(controller.height, radius * 2.0)
     return Bounds(
@@ -582,7 +591,7 @@ def _grid_cells(bounds: Bounds, cell_size: float) -> list[tuple[int, int, int]]:
 def _entity_colliders(entity: Entity) -> list[tuple[Entity, Collider]]:
     colliders: list[tuple[Entity, Collider]] = []
     def collect(owner: Entity, is_root: bool = False) -> None:
-        if not owner.active:
+        if not entity_effectively_active(owner):
             return
         physics = _entity_physics(owner)
         if not is_root and physics is not None and physics.enabled:
@@ -648,7 +657,7 @@ def _convex_collider_contacts(entity: Entity, collider: Collider, other_entity: 
 
 
 def _aabb_mesh_contacts(bounds: Bounds, entity: Entity, project: Any) -> list[_TriangleContact]:
-    renderer = mesh_renderer_for(entity)
+    renderer = render_geometry_for(entity)
     if renderer is None:
         return []
     ensure_mesh_collision_metadata(project, renderer)
@@ -741,7 +750,7 @@ def _sat_projected_sphere_contacts(vertices: list[Vec3], center: Vec3, radius: f
 
 
 def _world_convex_points(entity: Entity, collider: Collider, project: Any) -> tuple[list[Vec3], list[Vec3]]:
-    renderer = mesh_renderer_for(entity)
+    renderer = render_geometry_for(entity)
     if renderer:
         ensure_mesh_collision_metadata(project, renderer)
     hull = convex_hull(project, renderer) if renderer else None
@@ -754,7 +763,7 @@ def _world_convex_points(entity: Entity, collider: Collider, project: Any) -> tu
 
 
 def _sphere_mesh_contacts(center: Vec3, radius: float, entity: Entity, project: Any) -> list[_TriangleContact]:
-    renderer = mesh_renderer_for(entity)
+    renderer = render_geometry_for(entity)
     if renderer is None:
         return []
     ensure_mesh_collision_metadata(project, renderer)

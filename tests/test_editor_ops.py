@@ -22,15 +22,18 @@ from p64.editor.ops import (
     open_script_in_vscode_project,
     rename_asset_path,
     reset_material_asset,
+    split_mesh_renderer_into_children,
     update_startup_scene_after_asset_rename,
     update_material_usage_cache,
 )
 from p64.editor.panels.assets import visible_asset_paths
+from p64.editor.panels.hierarchy import virtual_submesh_labels
 from p64.engine.assets import AssetMetadata
-from p64.engine.components import AudioListener, Camera, Collider, EntityPhysics, MeshRenderer, ScriptComponent, ScriptEntry
+from p64.engine.builtin import PARTICLE_MATERIAL_RELATIVE, SPRITE_MATERIAL_RELATIVE, UI_IMAGE_MATERIAL_RELATIVE
+from p64.engine.components import AudioListener, Camera, Canvas, Collider, EntityPhysics, MeshRenderer, ModelRenderer, ParticleEmitter, RectTransform, ScriptComponent, ScriptEntry, SpriteRenderer, UIImage, UIText
 from p64.engine.files import find_metadata_for_source
 from p64.engine.material import MaterialAsset, load_material_metadata
-from p64.engine.entity import GAME_OBJECT, Entity
+from p64.engine.entity import ENTITY, GAME_OBJECT, Entity
 from p64.engine.project import Project
 from p64.engine.scene import Scene
 from p64.engine.validation import entity_reference_errors
@@ -295,6 +298,42 @@ class EditorOpsTests(unittest.TestCase):
         self.assertIsInstance(listener, AudioListener)
         self.assertTrue(listener.active)
 
+    def test_add_sprite_ui_and_particle_components_use_builtin_materials(self):
+        entity = Entity("Visuals")
+
+        sprite = add_component(entity, "SpriteRenderer")
+        image = add_component(entity, "UIImage")
+        particle = add_component(entity, "ParticleEmitter")
+
+        self.assertIsInstance(sprite, SpriteRenderer)
+        self.assertEqual(sprite.material, SPRITE_MATERIAL_RELATIVE)
+        self.assertIsInstance(image, UIImage)
+        self.assertEqual(image.material, UI_IMAGE_MATERIAL_RELATIVE)
+        self.assertIsInstance(particle, ParticleEmitter)
+        self.assertEqual(particle.material, PARTICLE_MATERIAL_RELATIVE)
+
+    def test_add_ui_components_under_canvas_creates_rect_transform(self):
+        canvas = Entity("Canvas")
+        canvas.add_component(Canvas())
+        child = canvas.add_child(Entity("Label"))
+
+        text = add_component(child, "UIText")
+
+        self.assertIsInstance(text, UIText)
+        self.assertIsInstance(child.rect_transform, RectTransform)
+        self.assertEqual(child.rect_transform.size.to_list(), [240.0, 40.0, 0.0])
+
+    def test_add_ui_image_under_canvas_creates_square_rect_transform(self):
+        canvas = Entity("Canvas")
+        canvas.add_component(Canvas())
+        child = canvas.add_child(Entity("Image"))
+
+        image = add_component(child, "UIImage")
+
+        self.assertIsInstance(image, UIImage)
+        self.assertIsInstance(child.rect_transform, RectTransform)
+        self.assertEqual(child.rect_transform.size.to_list(), [128.0, 128.0, 0.0])
+
     def test_validation_reports_entity_physics_on_game_object(self):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
@@ -315,13 +354,86 @@ class EditorOpsTests(unittest.TestCase):
             scene = project.load_startup_scene()
 
             entity = insert_obj_scene_entity(project, scene, source)
-            self.assertEqual(entity.children[0].name, "Body")
             self.assertTrue(entity.is_game_object)
-            self.assertTrue(entity.children[0].is_game_object)
-            renderer = entity.children[0].components[0]
-            self.assertIsInstance(renderer, MeshRenderer)
+            self.assertEqual(entity.children, [])
+            renderer = entity.components[0]
+            self.assertIsInstance(renderer, ModelRenderer)
+            self.assertTrue(renderer.model)
             self.assertEqual(renderer.source_materials, ["Mat"])
             self.assertEqual(renderer.material_slots, [None])
+
+    def test_split_mesh_renderer_into_children_creates_mesh_children(self):
+        parent = Entity("Model", object_type=GAME_OBJECT)
+        metadata = AssetMetadata(
+            id="model_robot",
+            kind="obj_mesh",
+            source="assets/robot.obj",
+            settings={
+                "model": {
+                    "meshes": [
+                        {"id": "mesh_robot_body", "name": "Body", "legacy_submesh": "Body", "material_slots": ["Paint"]},
+                        {"id": "mesh_robot_head", "name": "Head", "legacy_submesh": "Head", "material_slots": ["Paint"]},
+                    ]
+                },
+                "material_assets": {"Paint": "assets/materials/Paint.material"},
+            },
+        )
+
+        created = split_mesh_renderer_into_children(parent, metadata)
+
+        self.assertEqual([child.name for child in created], ["Body", "Head"])
+        self.assertEqual([child.object_type for child in created], [GAME_OBJECT, GAME_OBJECT])
+        renderer = created[0].components[0]
+        self.assertIsInstance(renderer, MeshRenderer)
+        self.assertEqual(renderer.mesh, "mesh_robot_body")
+        self.assertEqual(renderer.submesh, "Body")
+        self.assertEqual(renderer.source_materials, ["Paint"])
+        self.assertEqual(renderer.material_slots, ["assets/materials/Paint.material"])
+
+    def test_dynamic_components_require_entity_and_editor_switches_type(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            static = Entity("Static", object_type=GAME_OBJECT)
+            static.add_component(ScriptComponent(scripts=[ScriptEntry(script="move.py", class_name="Move")]))
+
+            self.assertIn("ScriptComponent requires an Entity", entity_reference_errors(project, static))
+
+            converted = Entity("Converted", object_type=GAME_OBJECT)
+            add_component(converted, "ScriptComponent")
+            self.assertEqual(converted.object_type, ENTITY)
+
+    def test_add_model_renderer_does_not_change_scene_object_type(self):
+        game_object = Entity("Static", object_type=GAME_OBJECT)
+        entity = Entity("Dynamic", object_type=ENTITY)
+
+        static_renderer = add_component(game_object, "ModelRenderer")
+        dynamic_renderer = add_component(entity, "ModelRenderer")
+
+        self.assertIsInstance(static_renderer, ModelRenderer)
+        self.assertIsInstance(dynamic_renderer, ModelRenderer)
+        self.assertEqual(game_object.object_type, GAME_OBJECT)
+        self.assertEqual(entity.object_type, ENTITY)
+
+    def test_virtual_submesh_labels_show_mesh_renderer_metadata(self):
+        entity = Entity("Model")
+        entity.add_component(MeshRenderer(mesh="model_robot"))
+        metadata = AssetMetadata(
+            id="model_robot",
+            kind="obj_mesh",
+            source="assets/robot.obj",
+            settings={
+                "model": {
+                    "meshes": [
+                        {"id": "mesh_robot_body", "name": "Body"},
+                        {"id": "mesh_robot_head", "source_group": "Head"},
+                    ]
+                }
+            },
+        )
+
+        labels = virtual_submesh_labels(entity, lambda mesh_id: metadata if mesh_id == metadata.id else None)
+
+        self.assertEqual(labels, ["Mesh: Body", "Mesh: Head"])
 
     def test_asset_browser_hides_metadata_sidecars(self):
         with TemporaryDirectory() as tmp:
@@ -449,7 +561,35 @@ class EditorOpsTests(unittest.TestCase):
             project.save_startup_scene(scene)
 
             report = validate_project(project.root)
-            self.assertTrue(any("missing texture" in error for error in report.errors))
+            self.assertFalse(any("missing texture" in error for error in report.errors))
+            self.assertTrue(any("missing texture" in warning for warning in report.warnings))
+
+    def test_validation_warns_for_missing_material_texture_without_blocking_build(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = AssetMetadata(
+                id="model_luigi",
+                kind="obj_mesh",
+                source="assets/luigi.obj",
+                groups=["Body"],
+                materials=[],
+                settings={"model": {"meshes": [{"id": "mesh_model_luigi_Body", "name": "Body"}]}},
+            )
+            (project.assets_dir / "luigi.obj").write_text("o Body\n", encoding="utf-8")
+            metadata.save(project.assets_dir / "luigi.obj.mdp64")
+            material_path = project.assets_dir / "materials" / "Broken.material"
+            material_path.parent.mkdir(parents=True)
+            MaterialAsset(textures={"u_texture": "missing.png"}).save(material_path)
+            scene = project.load_startup_scene()
+            entity = Entity("Luigi")
+            entity.add_component(ModelRenderer(model="model_luigi", material_slots=["assets/materials/Broken.material"]))
+            scene.add_entity(entity)
+            project.save_startup_scene(scene)
+
+            report = validate_project(project.root)
+
+            self.assertFalse(any("missing material texture" in error for error in report.errors))
+            self.assertTrue(any("missing material texture" in warning for warning in report.warnings))
 
     def test_reference_validation_reports_missing_mesh(self):
         with TemporaryDirectory() as tmp:

@@ -3,6 +3,50 @@
 P64 can validate projects, create runtime bundles, and build Windows desktop
 executables through PyInstaller.
 
+## Root Build Center
+
+On Windows, use the root `build.bat` to build P64 tooling:
+
+```powershell
+.\build.bat
+```
+
+With no arguments it opens the Build Center dashboard. The dashboard builds the
+portable P64 App/Hub, runs tests, or performs a full tooling build.
+
+Available targets:
+
+```text
+ui        open the Build Center dashboard
+app       build the portable P64 App/Hub executable
+hub       alias for app
+all       run verbose tests, then build the P64 App
+test      run the verbose test suite only
+```
+
+Examples:
+
+```powershell
+.\build.bat app
+.\build.bat all --skip-tests
+.\build.bat hub --skip-pyinstaller
+```
+
+The Build Center shows total and current-step progress, elapsed time, per-step
+durations, and structured log events. The `test` and `all` targets use verbose
+unittest output, so the log and test progress indicator show individual test
+names instead of only progress dots.
+
+`build_all.bat` is kept as a deprecated compatibility wrapper for
+`build.bat all`.
+
+Project/game builds are handled from the editor project build settings. The
+low-level project CLI remains available for automation:
+
+```powershell
+python -m p64 build path\to\Project
+```
+
 ## Validate
 
 ```powershell

@@ -7,7 +7,8 @@ from unittest import mock
 import unittest
 
 from p64.engine.math import Vec3
-from p64.engine.components import AudioSource, Camera, Collider, Light, MeshRenderer
+from p64.engine.assets import AssetMetadata
+from p64.engine.components import AudioSource, Camera, Canvas, Collider, Light, MeshRenderer, ModelRenderer, ParticleEmitter, RectTransform, SpriteRenderer, UIImage, UIText
 from p64.engine.entity import Entity
 from p64.engine.files import find_metadata_for_source
 from p64.engine.material import MaterialAsset, save_material_metadata
@@ -15,24 +16,44 @@ from p64.engine.obj import import_obj_to_project
 from p64.engine.project import Project
 from p64.engine.scene import Scene
 from p64.editor.app import _normalize_vec3, _vec3_length
+from p64.editor.profiler import ProfilerRecorder, aggregate_frames
 from p64.renderer.scene_renderer import (
     MESH_OUTLINE_LAYOUT,
     MESH_VERTEX_FLOATS,
     MESH_VERTEX_LAYOUT,
     RenderCamera,
     SceneRenderer,
+    TextTexture,
     cloud_dome_vertices,
+    flipbook_uv_rect,
     _convex_collider_wire_vertices,
+    _canvas_layout_size,
+    _camera_from_entity,
+    _game_render_size,
+    _identity_matrix,
     _mat4_bytes,
     _mesh_collider_wire_vertices,
+    particle_quad_vertices,
     _perspective_matrix,
     _project_point,
+    _render_geometry_cache_key,
     _view_matrix,
     audio_source_range_radii,
     camera_basis,
     camera_frustum_vertices,
     cloud_plane_vertices,
     grid_line_batches,
+    image_fill_uv_rect,
+    image_rect_for_fill_mode,
+    rect_transform_rect,
+    render_camera_basis,
+    sprite_quad_vertices,
+    text_rect_with_aspect,
+    ui_rect,
+    ui_layout_debug,
+    ui_quad_vertices,
+    ui_text_vertices,
+    ui_vertices_to_ndc,
 )
 from p64.renderer.shaders import CLOUD_PLANE_FRAGMENT_SHADER, CLOUD_PLANE_VERTEX_SHADER, SKYBOX_FRAGMENT_SHADER
 
@@ -61,6 +82,27 @@ class RendererMathTests(unittest.TestCase):
         self.assertIsNotNone(projected)
         self.assertAlmostEqual(projected[0], 400, delta=1)
         self.assertAlmostEqual(projected[1], 400, delta=1)
+
+    def test_camera_from_child_entity_uses_world_transform(self):
+        parent = Entity("Rig")
+        parent.transform.position = Vec3(10.0, 0.0, 0.0)
+        parent.transform.rotation = Vec3(0.0, 45.0, 0.0)
+        camera_entity = parent.add_child(Entity("Camera"))
+        camera_entity.transform.position = Vec3(0.0, 2.0, 0.0)
+        camera_entity.transform.rotation = Vec3(0.0, 15.0, 0.0)
+        camera_entity.add_component(Camera(fov=75.0, near=0.25, far=123.0))
+
+        camera = _camera_from_entity(camera_entity)
+
+        self.assertEqual(camera.position, Vec3(10.0, 2.0, 0.0))
+        self.assertEqual(camera.rotation, Vec3(0.0, 60.0, 0.0))
+        self.assertAlmostEqual(camera.forward.x, -0.8660254)
+        self.assertAlmostEqual(camera.forward.z, -0.5)
+        basis_forward, _basis_right, _basis_up = render_camera_basis(camera)
+        self.assertEqual(basis_forward, camera.forward)
+        self.assertEqual(camera.fov, 75.0)
+        self.assertEqual(camera.near, 0.25)
+        self.assertEqual(camera.far, 123.0)
 
     def test_broken_shader_uses_internal_error_program(self):
         with TemporaryDirectory() as tmp:
@@ -94,6 +136,7 @@ class RendererMathTests(unittest.TestCase):
             point.transform.position = Vec3(1, 2, 3)
             point.add_component(Light(kind="point", range=5.0, falloff=1.5))
             spot = Entity("Spot")
+            spot.transform.rotation = Vec3(0.0, 90.0, 0.0)
             spot.add_component(Light(kind="spot", range=8.0, spot_angle=35.0))
             scene.entities.extend([sun, point, spot])
             renderer = _renderer(project)
@@ -113,6 +156,8 @@ class RendererMathTests(unittest.TestCase):
             self.assertEqual(uniforms["u_light_kind[1]"].value, 1)
             self.assertEqual(uniforms["u_light_kind[2]"].value, 2)
             self.assertEqual(uniforms["u_light_position"].value[1], (1, 2, 3))
+            self.assertAlmostEqual(uniforms["u_light_direction"].value[2][0], -1.0)
+            self.assertAlmostEqual(uniforms["u_light_direction"].value[2][2], 0.0, places=6)
             self.assertEqual(len(uniforms["u_light_position"].value), 8)
             self.assertIsInstance(uniforms["u_light_position"].value[0], tuple)
             self.assertIsInstance(uniforms["u_light_direction"].value[0], tuple)
@@ -561,6 +606,91 @@ class RendererMathTests(unittest.TestCase):
             self.assertEqual(len(render_mesh.batches or []), 2)
             self.assertEqual(sum(batch.vao.render_count for batch in render_mesh.batches or []), 2)
 
+    def test_model_renderer_uses_persistent_cache_batches(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            obj = Path(tmp) / "static_model.obj"
+            obj.write_text(
+                "mtllib static_model.mtl\n"
+                "o WallA\n"
+                "v 0 0 0\n"
+                "v 1 0 0\n"
+                "v 0 1 0\n"
+                "usemtl Stone\n"
+                "f 1 2 3\n"
+                "o WallB\n"
+                "v 2 0 0\n"
+                "v 3 0 0\n"
+                "v 2 1 0\n"
+                "usemtl Stone\n"
+                "f 4 5 6\n",
+                encoding="utf-8",
+            )
+            (Path(tmp) / "static_model.mtl").write_text("newmtl Stone\nKd 0.2 0.2 0.2\n", encoding="utf-8")
+            metadata = import_obj_to_project(project, obj)
+            self.assertEqual(metadata.settings["model_cache"]["batch_count"], 1)
+            entity = Entity("Static Model")
+            entity.add_component(ModelRenderer(model=metadata.id, source_materials=["Stone"], material_slots=[None]))
+            scene = Scene("Test", [entity])
+            scene.render_settings["skybox_enabled"] = False
+            renderer = _renderer(project)
+            recorder = ProfilerRecorder()
+            recorder.set_enabled(True)
+            renderer.profiler_recorder = recorder
+
+            frame = recorder.begin_frame("Scene")
+            renderer.render(scene, 800, 800, camera=RenderCamera(Vec3(0, 0, 5), Vec3()), show_grid=False)
+            recorder.end_frame(frame)
+
+            model = next(iter(renderer._model_cache.values()))
+            self.assertTrue(model.cache_hit)
+            self.assertEqual(len(model.batches), 1)
+            self.assertEqual(sum(batch.vao.render_count for batch in model.batches), 1)
+            counts = aggregate_frames(recorder.frames()).counts
+            self.assertEqual(counts["model renderers"], 1)
+            self.assertEqual(counts["dynamic model renderers"], 1)
+            self.assertEqual(counts["static model renderers"], 0)
+            self.assertEqual(counts["static model batches"], 1)
+            self.assertEqual(counts["static cache hits"], 1)
+            self.assertEqual(counts["draw submissions"], 1)
+
+    def test_model_renderer_rebuilds_when_persistent_cache_signature_is_stale(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            obj = Path(tmp) / "static_model.obj"
+            obj.write_text(
+                "o Body\n"
+                "v 0 0 0\n"
+                "v 1 0 0\n"
+                "v 0 1 0\n"
+                "f 1 2 3\n",
+                encoding="utf-8",
+            )
+            metadata = import_obj_to_project(project, obj)
+            metadata_path = find_metadata_for_source(project.root / metadata.source)
+            reloaded = AssetMetadata.load(metadata_path)
+            reloaded.settings["model_cache"]["source_signature"] = {"size": -1, "mtime_ns": -1}
+            reloaded.save(metadata_path)
+            entity = Entity("Static Model")
+            entity.add_component(ModelRenderer(model=metadata.id))
+            scene = Scene("Test", [entity])
+            scene.render_settings["skybox_enabled"] = False
+            renderer = _renderer(project)
+            recorder = ProfilerRecorder()
+            recorder.set_enabled(True)
+            renderer.profiler_recorder = recorder
+
+            frame = recorder.begin_frame("Scene")
+            renderer.render(scene, 800, 800, camera=RenderCamera(Vec3(0, 0, 5), Vec3()), show_grid=False)
+            recorder.end_frame(frame)
+
+            model = next(iter(renderer._model_cache.values()))
+            self.assertFalse(model.cache_hit)
+            counts = aggregate_frames(recorder.frames()).counts
+            self.assertEqual(counts["static model batches"], 1)
+            self.assertNotIn("static cache hits", counts)
+            self.assertEqual(counts["draw submissions"], 1)
+
     def test_skybox_pass_renders_before_meshes_when_enabled(self):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
@@ -577,6 +707,90 @@ class RendererMathTests(unittest.TestCase):
             renderer.render(scene, 320, 240, camera=RenderCamera(Vec3(), Vec3()), show_grid=False)
 
             self.assertEqual(events, ["skybox", "cloud", "mesh"])
+
+    def test_renderer_reports_profiler_sections_when_enabled(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            renderer = _renderer(project)
+            recorder = ProfilerRecorder()
+            recorder.set_enabled(True)
+            renderer.profiler_recorder = recorder
+            scene = Scene("Profile", [
+                Entity("Mesh", components=[MeshRenderer(mesh="missing")]),
+                Entity("Emitter", components=[ParticleEmitter()]),
+                Entity("Label", components=[UIImage(), UIText(text="Ready")]),
+            ])
+
+            frame = recorder.begin_frame("Scene")
+            renderer.render(scene, 320, 240, RenderCamera(Vec3(), Vec3()))
+            recorder.end_frame(frame)
+            snapshot = aggregate_frames(recorder.frames())
+            names = {section.name for section in snapshot.sections}
+
+            self.assertIn("render total", names)
+            self.assertIn("render skybox", names)
+            self.assertIn("render clouds", names)
+            self.assertIn("render meshes", names)
+            self.assertIn("render particles", names)
+            self.assertIn("render ui", names)
+            self.assertIn("active entities", snapshot.counts)
+
+    def test_renderer_skips_profiler_counts_without_active_profiler(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            renderer = _renderer(project)
+            scene = Scene("No Profiler")
+            scene.render_settings["skybox_enabled"] = False
+            calls: list[str] = []
+            renderer._add_render_counts = lambda _active_entities: calls.append("counts")
+
+            renderer.render(scene, 320, 240, RenderCamera(Vec3(), Vec3()), show_grid=False)
+
+            self.assertEqual(calls, [])
+
+    def test_game_view_upscale_quad_is_cached(self):
+        source = Path("src/p64/renderer/scene_renderer.py").read_text(encoding="utf-8")
+        draw_method = source[source.index("def _draw_upscaled_texture"):source.index("def _upscale_quad_resources")]
+
+        self.assertIn("self._upscale_quad", source)
+        self.assertIn("def _upscale_quad_resources", source)
+        self.assertIn("def _release_upscale_quad", source)
+        self.assertIn("_buffer, vao = self._upscale_quad_resources()", draw_method)
+        self.assertNotIn("self.ctx.buffer(struct.pack", draw_method)
+        self.assertNotIn("buffer.release()", draw_method)
+        self.assertNotIn("vao.release()", draw_method)
+
+    def test_model_renderer_mesh_collider_lines_do_not_require_mesh_attribute(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = AssetMetadata(
+                id="model_luigi",
+                kind="obj_mesh",
+                source="assets/luigi.obj",
+                groups=["Body"],
+                materials=[],
+                settings={
+                    "model": {
+                        "meshes": [{
+                            "id": "mesh_model_luigi_Body",
+                            "name": "Body",
+                            "source_group": "Body",
+                            "wireframe": {"vertices": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0]},
+                        }],
+                    },
+                },
+            )
+            (project.assets_dir / "luigi.obj").write_text("o Body\n", encoding="utf-8")
+            metadata.save(project.assets_dir / "luigi.obj.mdp64")
+            renderer = _renderer(project)
+            component = ModelRenderer(model=metadata.id)
+
+            line_mesh = renderer._load_mesh_collider_lines(component)
+            convex_line_mesh = renderer._load_convex_collider_lines(component)
+
+            self.assertIsNotNone(line_mesh)
+            self.assertIsNone(convex_line_mesh)
+            self.assertEqual(_render_geometry_cache_key(component), ("model", metadata.id, None))
 
     def test_skybox_pass_skips_when_disabled(self):
         with TemporaryDirectory() as tmp:
@@ -612,6 +826,23 @@ class RendererMathTests(unittest.TestCase):
             self.assertTrue(any("Background pass begin/depth_mask failed: RuntimeError" in message for message in logs))
             self.assertTrue(any("Background pass begin/disable_depth failed: RuntimeError" in message for message in logs))
             self.assertFalse(any(message.startswith("Render failed") for message in logs))
+
+    def test_not_implemented_blend_state_does_not_abort_ui_render(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            entity = Entity("Hud")
+            entity.add_component(UIImage())
+            scene = Scene("UI", [entity])
+            scene.render_settings["skybox_enabled"] = False
+            logs: list[str] = []
+            renderer = _renderer(project, logs.append)
+            renderer.ctx.fail_blend_func_not_implemented = True
+
+            renderer.render(scene, 320, 240, camera=RenderCamera(Vec3(), Vec3()), show_grid=False)
+
+            self.assertFalse(any("blend_func failed" in message for message in logs))
+            self.assertFalse(any("UI batch render failed" in message for message in logs))
+            self.assertGreater(renderer.ctx.vertex_array_count, 0)
 
     def test_skybox_vao_failure_logs_stage_and_render_continues(self):
         with TemporaryDirectory() as tmp:
@@ -701,6 +932,431 @@ class RendererMathTests(unittest.TestCase):
             renderer.reload_assets()
             self.assertIsNone(renderer.cloud_plane_vao)
 
+    def test_flipbook_uv_rect_selects_expected_frame(self):
+        self.assertEqual(flipbook_uv_rect(4, 2, 8.0, 1, 6, 0.25), (0.75, 0.0, 1.0, 0.5))
+        self.assertEqual(flipbook_uv_rect(1, 1, 0.0, 0, 0, 10.0), (0.0, 0.0, 1.0, 1.0))
+
+    def test_sprite_quad_vertices_billboard_to_camera(self):
+        entity = Entity("Sprite")
+        entity.transform.position = Vec3(1.0, 2.0, 3.0)
+        sprite = SpriteRenderer(size=Vec3(2.0, 4.0, 1.0), pivot=Vec3(0.5, 0.5, 0.0))
+        vertices = sprite_quad_vertices(entity, sprite, RenderCamera(Vec3(0, 0, 8), Vec3()))
+
+        self.assertEqual(len(vertices), 6 * 8)
+        xs = vertices[0::8]
+        ys = vertices[1::8]
+        self.assertAlmostEqual(min(xs), 0.0)
+        self.assertAlmostEqual(max(xs), 2.0)
+        self.assertAlmostEqual(min(ys), 0.0)
+        self.assertAlmostEqual(max(ys), 4.0)
+
+    def test_ui_rect_and_quad_vertices_use_pixel_anchors(self):
+        image = UIImage(size=Vec3(100.0, 50.0, 0.0), anchor="top-left", offset=Vec3(10.0, 20.0, 0.0), pivot=Vec3(0.0, 0.0, 0.0))
+
+        self.assertEqual(ui_rect(image.anchor, image.offset, image.size, image.pivot, 800, 600), (10.0, 20.0, 100.0, 50.0))
+        vertices = ui_quad_vertices(image, 800, 600)
+
+        self.assertEqual(len(vertices), 6 * 8)
+        self.assertEqual(vertices[:5], [10.0, 70.0, 0.0, 0.0, 0.0])
+
+    def test_rect_transform_vertices_are_relative_to_parent_rect(self):
+        rect = rect_transform_rect(
+            RectTransform(anchor="top-left", offset=Vec3(10.0, 20.0, 0.0), size=Vec3(100.0, 50.0, 0.0), pivot=Vec3(0.0, 0.0, 0.0)),
+            (50.0, 60.0, 400.0, 300.0),
+        )
+        image_vertices = ui_quad_vertices(UIImage(), 800, 600, rect=rect)
+        text_vertices = ui_text_vertices(UIText(text="Score"), 800, 600, rect=rect, texture_size=(100, 50))
+
+        self.assertEqual(rect, (60.0, 80.0, 100.0, 50.0))
+        self.assertEqual(image_vertices[:5], [60.0, 130.0, 0.0, 0.0, 0.0])
+        self.assertEqual(text_vertices[:5], [60.0, 130.0, 0.0, 0.0, 0.0])
+
+    def test_rect_transform_center_bounds_define_y_limits(self):
+        rect = rect_transform_rect(
+            RectTransform(anchor="center", offset=Vec3(0.0, 0.0, 0.0), size=Vec3(160.0, 48.0, 0.0), pivot=Vec3(0.5, 0.5, 0.0)),
+            (0.0, 0.0, 800.0, 600.0),
+        )
+
+        self.assertEqual(rect, (320.0, 276.0, 160.0, 48.0))
+        self.assertEqual((rect[1], rect[1] + rect[3]), (276.0, 324.0))
+
+    def test_ui_layout_debug_reports_rect_and_content_bounds(self):
+        canvas = Entity("Canvas", components=[Canvas()])
+        child = canvas.add_child(Entity(
+            "Card",
+            rect_transform=RectTransform(size=Vec3(160.0, 48.0, 0.0)),
+            components=[
+                UIImage(size=Vec3(128.0, 128.0, 0.0), fill_mode="fit"),
+                UIText(text="Text", font_size=24.0),
+            ],
+        ))
+        scene = Scene("UI", [canvas])
+
+        entries = ui_layout_debug(scene, 800, 600, text_size_getter=lambda _component: (120, 30))
+        entry = next(item for item in entries if item.entity_id == child.id)
+
+        self.assertEqual(entry.rect, (320.0, 276.0, 160.0, 48.0))
+        self.assertEqual(entry.image_rects, ((376.0, 276.0, 48.0, 48.0),))
+        self.assertEqual(entry.text_rects, ((320.0, 280.0, 160.0, 40.0),))
+
+    def test_child_rect_transform_is_relative_to_parent_rect(self):
+        canvas = Entity("Canvas", components=[Canvas()])
+        parent = canvas.add_child(Entity(
+            "Panel",
+            rect_transform=RectTransform(anchor="top-left", offset=Vec3(100.0, 50.0, 0.0), size=Vec3(300.0, 200.0, 0.0), pivot=Vec3(0.0, 0.0, 0.0)),
+        ))
+        child = parent.add_child(Entity(
+            "Child",
+            rect_transform=RectTransform(anchor="bottom-right", offset=Vec3(-10.0, -20.0, 0.0), size=Vec3(80.0, 40.0, 0.0), pivot=Vec3(1.0, 1.0, 0.0)),
+            components=[UIImage()],
+        ))
+        scene = Scene("UI", [canvas])
+
+        entries = ui_layout_debug(scene, 800, 600)
+        entry = next(item for item in entries if item.entity_id == child.id)
+
+        self.assertEqual(entry.rect, (310.0, 190.0, 80.0, 40.0))
+
+    def test_canvas_root_without_rect_transform_uses_canvas_layout_as_parent_box(self):
+        canvas = Entity("Canvas", components=[Canvas(reference_resolution=Vec3(640.0, 480.0, 0.0), resolution_mode="fixed")])
+        child = canvas.add_child(Entity(
+            "Child",
+            rect_transform=RectTransform(anchor="bottom-right", size=Vec3(100.0, 50.0, 0.0), pivot=Vec3(1.0, 1.0, 0.0)),
+            components=[UIImage()],
+        ))
+        scene = Scene("UI", [canvas])
+
+        entries = ui_layout_debug(scene, 800, 600)
+        entry = next(item for item in entries if item.entity_id == child.id)
+
+        self.assertEqual(entry.rect, (540.0, 430.0, 100.0, 50.0))
+
+    def test_ui_image_stretch_fill_mode_uses_full_rect_transform_box(self):
+        rect = (10.0, 20.0, 160.0, 48.0)
+        image = UIImage(size=Vec3(128.0, 128.0, 0.0), fill_mode="stretch")
+        legacy = UIImage(size=Vec3(128.0, 128.0, 0.0), fill_mode="simple")
+
+        self.assertEqual(image_rect_for_fill_mode(image, rect), rect)
+        self.assertEqual(image_rect_for_fill_mode(legacy, rect), rect)
+        self.assertEqual(ui_quad_vertices(image, 800, 600, rect=rect)[:5], [10.0, 68.0, 0.0, 0.0, 0.0])
+
+    def test_ui_image_fit_fill_mode_preserves_aspect_inside_rect_transform_box(self):
+        rect = (10.0, 20.0, 160.0, 48.0)
+        image = UIImage(size=Vec3(128.0, 128.0, 0.0), fill_mode="fit")
+        vertices = ui_quad_vertices(image, 800, 600, rect=rect)
+
+        self.assertEqual(image_rect_for_fill_mode(image, rect), (66.0, 20.0, 48.0, 48.0))
+        self.assertEqual(vertices[:5], [66.0, 68.0, 0.0, 0.0, 0.0])
+
+    def test_ui_vertices_to_ndc_maps_fullscreen_pixel_rect_to_clipspace(self):
+        vertices = ui_quad_vertices(UIImage(), 800, 600, rect=(0.0, 0.0, 800.0, 600.0))
+        ndc = ui_vertices_to_ndc(vertices, 800, 600)
+
+        self.assertEqual(ndc[:5], [-1.0, -1.0, 0.0, 0.0, 0.0])
+        self.assertEqual(ndc[8:13], [1.0, -1.0, 0.0, 1.0, 0.0])
+        self.assertEqual(ndc[16:21], [1.0, 1.0, 0.0, 1.0, 1.0])
+        self.assertEqual(ndc[24:29], [-1.0, -1.0, 0.0, 0.0, 0.0])
+        self.assertEqual(ndc[32:37], [1.0, 1.0, 0.0, 1.0, 1.0])
+        self.assertEqual(ndc[40:45], [-1.0, 1.0, 0.0, 0.0, 1.0])
+
+    def test_ui_vertices_to_ndc_maps_center_rect_without_aspect_stretch(self):
+        vertices = ui_quad_vertices(UIImage(), 800, 600, rect=(320.0, 276.0, 160.0, 48.0))
+        ndc = ui_vertices_to_ndc(vertices, 800, 600)
+        xs = ndc[0::8]
+        ys = ndc[1::8]
+
+        self.assertAlmostEqual(min(xs), -0.2)
+        self.assertAlmostEqual(max(xs), 0.2)
+        self.assertAlmostEqual(min(ys), -0.08)
+        self.assertAlmostEqual(max(ys), 0.08)
+
+    def test_ui_image_fit_pixel_rect_then_ndc_quad_preserves_shape(self):
+        rect = (10.0, 20.0, 160.0, 48.0)
+        image = UIImage(size=Vec3(128.0, 128.0, 0.0), fill_mode="fit")
+        vertices = ui_quad_vertices(image, 800, 600, rect=rect)
+        ndc = ui_vertices_to_ndc(vertices, 800, 600)
+        xs = ndc[0::8]
+        ys = ndc[1::8]
+
+        self.assertEqual(image_rect_for_fill_mode(image, rect), (66.0, 20.0, 48.0, 48.0))
+        self.assertAlmostEqual(max(xs) - min(xs), 48.0 / 800.0 * 2.0)
+        self.assertAlmostEqual(max(ys) - min(ys), 48.0 / 600.0 * 2.0)
+
+    def test_ui_text_pixel_rect_then_ndc_quad_preserves_shape(self):
+        rect = (10.0, 20.0, 20.0, 200.0)
+        vertices = ui_text_vertices(UIText(text="Score"), 800, 600, rect=rect, texture_size=(120, 30))
+        ndc = ui_vertices_to_ndc(vertices, 800, 600)
+        xs = ndc[0::8]
+        ys = ndc[1::8]
+
+        self.assertAlmostEqual(max(xs) - min(xs), 20.0 / 800.0 * 2.0)
+        self.assertAlmostEqual(max(ys) - min(ys), 5.0 / 600.0 * 2.0)
+
+    def test_ui_image_fill_fill_mode_crops_uvs_without_stretching_quad(self):
+        rect = (10.0, 20.0, 160.0, 48.0)
+        image = UIImage(size=Vec3(128.0, 128.0, 0.0), fill_mode="fill")
+
+        self.assertEqual(image_rect_for_fill_mode(image, rect), rect)
+        self.assertEqual(image_fill_uv_rect(image, rect, (0.0, 0.0, 1.0, 1.0)), (0.0, 0.35, 1.0, 0.65))
+        self.assertEqual(ui_quad_vertices(image, 800, 600, rect=rect)[:5], [10.0, 68.0, 0.0, 0.0, 0.35])
+
+    def test_ui_text_rect_preserves_texture_aspect_in_narrow_layout_box(self):
+        component = UIText(text="Score", alignment="center")
+        rect = (10.0, 20.0, 20.0, 200.0)
+        vertices = ui_text_vertices(component, 800, 600, rect=rect, texture_size=(120, 30))
+
+        xs = vertices[0::8]
+        ys = vertices[1::8]
+        self.assertAlmostEqual(max(xs) - min(xs), 20.0)
+        self.assertAlmostEqual(max(ys) - min(ys), 5.0)
+        self.assertAlmostEqual(min(ys), 117.5)
+
+    def test_ui_text_alignment_offsets_aspect_fit_quad_inside_rect(self):
+        rect = (10.0, 20.0, 200.0, 40.0)
+
+        left = text_rect_with_aspect(UIText(alignment="left"), rect, (100, 40))
+        center = text_rect_with_aspect(UIText(alignment="center"), rect, (100, 40))
+        right = text_rect_with_aspect(UIText(alignment="right"), rect, (100, 40))
+
+        self.assertEqual(left, (10.0, 20.0, 100.0, 40.0))
+        self.assertEqual(center, (60.0, 20.0, 100.0, 40.0))
+        self.assertEqual(right, (110.0, 20.0, 100.0, 40.0))
+
+    def test_particle_emitter_spawns_and_particle_vertices_fade(self):
+        emitter = ParticleEmitter(max_particles=2, lifetime=1.0, start_size=1.0)
+        emitter.emit(3)
+        emitter._runtime_particles[0]["age"] = 0.5
+        entity = Entity("Emitter", components=[emitter])
+        vertices = particle_quad_vertices(entity, emitter, RenderCamera(Vec3(0, 0, 5), Vec3()))
+
+        self.assertEqual(len(emitter._runtime_particles), 2)
+        self.assertEqual(len(vertices), 2 * 6 * 8)
+        self.assertIn(0.5, vertices[5::8])
+
+    def test_ui_text_texture_prefers_bitmap_font_reference(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            font = project.assets_dir / "ui.ttf"
+            font.write_bytes(b"not a real font")
+            renderer = _renderer(project)
+            component = UIText(text="Score", font_source="asset", bitmap_font="assets/ui.ttf", font_family="MissingFont")
+
+            class FakeImage:
+                def __init__(self, size):
+                    self.size = size
+
+                def tobytes(self):
+                    return b"\xff" * (self.size[0] * self.size[1] * 4)
+
+                def putalpha(self, _mask):
+                    return None
+
+                def transpose(self, _mode):
+                    return self
+
+            class FakeDraw:
+                def textbbox(self, _position, _text, font=None):
+                    return (0, 0, 32, 12)
+
+                def text(self, *_args, **_kwargs):
+                    return None
+
+            image_module = type("ImageModule", (), {})()
+            image_module.Transpose = type("Transpose", (), {"FLIP_TOP_BOTTOM": object()})
+            image_module.new = mock.Mock(side_effect=lambda _mode, size, *_args: FakeImage(size))
+            image_module.frombytes = mock.Mock(side_effect=lambda _mode, size, _data: FakeImage(size))
+            image_draw_module = type("ImageDrawModule", (), {"Draw": mock.Mock(return_value=FakeDraw())})()
+            image_font_module = type("ImageFontModule", (), {})()
+            image_font_module.truetype = mock.Mock(return_value=object())
+            image_font_module.load_default = mock.Mock(return_value=object())
+            pil_module = type("PILModule", (), {})()
+            pil_module.Image = image_module
+            pil_module.ImageDraw = image_draw_module
+            pil_module.ImageFont = image_font_module
+
+            modules = {
+                "PIL": pil_module,
+                "PIL.Image": image_module,
+                "PIL.ImageDraw": image_draw_module,
+                "PIL.ImageFont": image_font_module,
+            }
+            with mock.patch.dict("sys.modules", modules):
+                text_texture = renderer._text_texture(component)
+
+            self.assertEqual(image_font_module.truetype.call_args.args[0], str(font))
+            self.assertEqual(text_texture.size, (36, 16))
+
+    def test_ui_text_texture_system_font_ignores_bitmap_font_reference(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            font = project.assets_dir / "ui.ttf"
+            font.write_bytes(b"not a real font")
+            renderer = _renderer(project)
+            component = UIText(text="Score", font_source="system", bitmap_font="assets/ui.ttf", font_family="System")
+
+            class FakeImage:
+                def __init__(self, size):
+                    self.size = size
+
+                def tobytes(self):
+                    return b"\xff" * (self.size[0] * self.size[1] * 4)
+
+                def putalpha(self, _mask):
+                    return None
+
+                def transpose(self, _mode):
+                    return self
+
+            class FakeDraw:
+                def textbbox(self, _position, _text, font=None):
+                    return (0, 0, 32, 12)
+
+                def text(self, *_args, **_kwargs):
+                    return None
+
+            image_module = type("ImageModule", (), {})()
+            image_module.Transpose = type("Transpose", (), {"FLIP_TOP_BOTTOM": object()})
+            image_module.new = mock.Mock(side_effect=lambda _mode, size, *_args: FakeImage(size))
+            image_module.frombytes = mock.Mock(side_effect=lambda _mode, size, _data: FakeImage(size))
+            image_draw_module = type("ImageDrawModule", (), {"Draw": mock.Mock(return_value=FakeDraw())})()
+            image_font_module = type("ImageFontModule", (), {})()
+            image_font_module.truetype = mock.Mock(return_value=object())
+            image_font_module.load_default = mock.Mock(return_value=object())
+            pil_module = type("PILModule", (), {})()
+            pil_module.Image = image_module
+            pil_module.ImageDraw = image_draw_module
+            pil_module.ImageFont = image_font_module
+
+            modules = {
+                "PIL": pil_module,
+                "PIL.Image": image_module,
+                "PIL.ImageDraw": image_draw_module,
+                "PIL.ImageFont": image_font_module,
+            }
+            with mock.patch.dict("sys.modules", modules):
+                renderer._text_texture(component)
+
+            image_font_module.truetype.assert_not_called()
+            image_font_module.load_default.assert_called()
+
+    def test_ui_text_texture_uses_alpha_mask_without_opaque_background(self):
+        try:
+            import PIL  # noqa: F401
+        except Exception:
+            self.skipTest("PIL is not available")
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            renderer = _renderer(project)
+
+            text_texture = renderer._text_texture(UIText(text="Text", color=Vec3(1.0, 0.0, 0.0), alpha=0.25))
+
+            data = text_texture.texture.data
+            alphas = data[3::4]
+            self.assertIn(0, alphas)
+            self.assertTrue(any(alpha > 0 for alpha in alphas))
+            for index in range(0, len(data), 4):
+                if data[index + 3] == 0:
+                    self.assertEqual(data[index:index + 4], b"\x00\x00\x00\x00")
+                    break
+            else:
+                self.fail("Text atlas did not contain a transparent background pixel")
+
+    def test_ui_text_texture_final_fallback_is_transparent_not_white(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            renderer = _renderer(project)
+            blocked_modules = {
+                "PIL": None,
+                "PIL.Image": None,
+                "PIL.ImageDraw": None,
+                "PIL.ImageFont": None,
+                "PySide6": None,
+                "PySide6.QtCore": None,
+                "PySide6.QtGui": None,
+            }
+
+            with mock.patch.dict("sys.modules", blocked_modules):
+                text_texture = renderer._text_texture(UIText(text="Text"))
+
+            self.assertEqual(text_texture.texture.data, b"\x00\x00\x00\x00")
+
+    def test_canvas_fixed_layout_uses_reference_resolution(self):
+        auto = Canvas(resolution_mode="auto", reference_resolution=Vec3(640, 480, 0))
+        fixed = Canvas(resolution_mode="fixed", reference_resolution=Vec3(640, 480, 0))
+
+        self.assertEqual(_canvas_layout_size(auto, 800, 600), (800, 600))
+        self.assertEqual(_canvas_layout_size(fixed, 800, 600), (640, 480))
+
+    def test_fixed_canvas_reference_resolution_drives_game_render_size(self):
+        canvas = Entity("Canvas", components=[Canvas(resolution_mode="fixed", reference_resolution=Vec3(1280, 720, 0))])
+        scene = Scene("UI", [canvas], render_settings={"internal_resolution": [320, 240]})
+
+        self.assertEqual(_game_render_size(scene, scene.render_settings), (1280, 720))
+
+    def test_game_view_without_active_camera_does_not_use_fallback_camera(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            renderer = _renderer(project)
+            scene = Scene("No Camera", [Entity("Mesh", components=[MeshRenderer(mesh="missing")])])
+
+            rendered = renderer.render(scene, 320, 240, game_view=True)
+
+            self.assertFalse(rendered)
+            self.assertEqual(renderer.ctx.vertex_array_count, 0)
+
+    def test_game_view_ignores_camera_under_inactive_parent(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            renderer = _renderer(project)
+            parent = Entity("Inactive", active=False)
+            parent.add_child(Entity("Camera", components=[Camera(active=True)]))
+            scene = Scene("Inactive Camera", [parent])
+
+            rendered = renderer.render(scene, 320, 240, game_view=True)
+
+            self.assertFalse(rendered)
+
+    def test_ui_components_draw_in_component_order(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            renderer = _renderer(project)
+            image_texture = object()
+            text_texture = object()
+            calls: list[str] = []
+            entity = Entity("Label", components=[UIImage(), UIText(text="Text")])
+            scene = Scene("UI", [entity])
+
+            renderer._component_texture = lambda *_args: image_texture
+            renderer._text_texture = lambda _component: TextTexture(text_texture, (40, 20))
+            renderer._draw_ui_quad_batch = lambda _vertices, _program, texture, *_args: calls.append("text" if texture is text_texture else "image")
+
+            renderer._draw_ui(scene, 320, 240)
+
+            self.assertEqual(calls, ["image", "text"])
+
+    def test_ui_quad_batch_does_not_set_projection_uniform(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            renderer = _renderer(project)
+            program = FakeProgram({"in_position", "in_uv", "in_color"})
+            vertices = ui_quad_vertices(UIImage(), 320, 240, rect=(0.0, 0.0, 320.0, 240.0))
+
+            renderer._draw_ui_quad_batch(vertices, program, FakeTexture(), 320, 240, Vec3(1.0, 1.0, 1.0), 1.0, None)
+
+            self.assertNotIn("u_projection", program.uniforms)
+            self.assertIn("u_texture", program.uniforms)
+
+    def test_textured_quad_batch_still_sets_projection_uniform(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            renderer = _renderer(project)
+            program = FakeProgram({"in_position", "in_uv", "in_color"})
+            vertices = ui_quad_vertices(UIImage(), 320, 240, rect=(0.0, 0.0, 32.0, 32.0))
+
+            renderer._draw_textured_quad_batch(vertices, program, FakeTexture(), _identity_matrix(), _identity_matrix(), _identity_matrix(), Vec3(1.0, 1.0, 1.0), 1.0, None)
+
+            self.assertIn("u_projection", program.uniforms)
+
     def test_skybox_gradient_and_cloud_plane_shader_are_split(self):
         self.assertNotIn("value_noise", SKYBOX_FRAGMENT_SHADER)
         self.assertIn("value_noise", CLOUD_PLANE_FRAGMENT_SHADER)
@@ -750,6 +1406,7 @@ class FakeContext:
         self.fail_disable = False
         self.fail_depth_mask = False
         self.fail_blend_func = False
+        self.fail_blend_func_not_implemented = False
         self._depth_mask = True
         self._blend_func = None
 
@@ -765,10 +1422,14 @@ class FakeContext:
 
     @property
     def blend_func(self):
+        if self.fail_blend_func_not_implemented:
+            raise NotImplementedError()
         return self._blend_func
 
     @blend_func.setter
     def blend_func(self, value):
+        if self.fail_blend_func_not_implemented:
+            raise NotImplementedError()
         if self.fail_blend_func:
             raise RuntimeError("blend_func boom")
         self._blend_func = value
@@ -799,7 +1460,7 @@ class FakeContext:
         return vao
 
     def texture(self, size: tuple[int, int], components: int, data: bytes):
-        return FakeTexture()
+        return FakeTexture(size, components, data)
 
     def clear(self, red: float, green: float, blue: float, alpha: float) -> None:
         pass
@@ -846,6 +1507,11 @@ class FakeBuffer:
 class FakeTexture:
     filter = None
 
+    def __init__(self, size: tuple[int, int] = (1, 1), components: int = 4, data: bytes = b""):
+        self.size = size
+        self.components = components
+        self.data = data
+
     def use(self, location: int = 0) -> None:
         pass
 
@@ -874,6 +1540,7 @@ def _renderer(project: Project, log: object | None = None) -> SceneRenderer:
         BLEND=3,
         SRC_ALPHA=4,
         ONE_MINUS_SRC_ALPHA=5,
+        ONE=6,
     )
     try:
         return SceneRenderer(FakeContext(), project, log)

@@ -7,15 +7,16 @@ import unittest
 
 from p64.__main__ import main as p64_main
 import p64.engine.project as project_module
-from p64.engine.builtin import LEGACY_STANDARD_SHADER_RELATIVE, STANDARD_SHADER_RELATIVE, STANDARD_UNLIT_SHADER_RELATIVE
-from p64.engine.components import AudioListener, EntityPhysics, Fog, Light, MeshRenderer, ScriptComponent, ScriptEntry, SpawnPoint
-from p64.engine.entity import GAME_OBJECT, Entity, set_object_type_recursive
+from p64.engine.builtin import LEGACY_STANDARD_SHADER_RELATIVE, PARTICLE_MATERIAL_RELATIVE, SPRITE_MATERIAL_RELATIVE, STANDARD_SHADER_RELATIVE, STANDARD_UNLIT_SHADER_RELATIVE, UI_IMAGE_MATERIAL_RELATIVE
+from p64.engine.components import AudioListener, Camera, Canvas, EntityPhysics, Fog, Light, MeshRenderer, ModelRenderer, ParticleEmitter, RectTransform, ScriptComponent, ScriptEntry, SpawnPoint, SpriteRenderer, Transform, UIImage, UIText
+from p64.engine.entity import GAME_OBJECT, Entity, entity_effectively_active, set_object_type_recursive
 from p64.engine.migration import migrate_project_files
 from p64.engine.math import Vec3
 from p64.engine.project import Project, _builder_script_source, _source_p64_package_dir, default_render_settings, ensure_project_runtime_env, is_project_runtime_env_ready
 from p64.engine.render_settings import clamp_render_settings
 from p64.engine.scene import Scene
 from p64.engine.scene_manager import SceneManager
+from p64.engine.transforms import local_to_world_direction, set_world_position, world_forward, world_position, world_right, world_rotation, world_scale, world_up
 from p64.engine.vscode import setup_vscode_project
 
 
@@ -35,6 +36,9 @@ class ProjectSceneTests(unittest.TestCase):
             self.assertTrue((project.root / "assets" / "scripts").exists())
             self.assertTrue((project.root / STANDARD_SHADER_RELATIVE).exists())
             self.assertTrue((project.root / STANDARD_UNLIT_SHADER_RELATIVE).exists())
+            self.assertTrue((project.root / SPRITE_MATERIAL_RELATIVE).exists())
+            self.assertTrue((project.root / UI_IMAGE_MATERIAL_RELATIVE).exists())
+            self.assertTrue((project.root / PARTICLE_MATERIAL_RELATIVE).exists())
             self.assertTrue((project.root / "libraries" / "P64Build" / "builder.py").exists())
             self.assertTrue((project.root / "libraries" / "P64Build" / "requirements-build.txt").exists())
             self.assertTrue((project.root / ".vscode" / "settings.json").exists())
@@ -57,6 +61,19 @@ class ProjectSceneTests(unittest.TestCase):
             self.assertEqual(project.runtime_env_dir, project.root / ".venv")
             expected = project.runtime_env_dir / ("Scripts" if project_module.os.name == "nt" else "bin")
             self.assertEqual(project.runtime_python.parent, expected)
+
+    def test_project_load_refreshes_missing_builtin_materials(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            material = project.root / SPRITE_MATERIAL_RELATIVE
+            metadata = material.with_suffix(material.suffix + ".mdp64")
+            material.unlink()
+            metadata.unlink()
+
+            Project.load(project.root)
+
+            self.assertTrue(material.exists())
+            self.assertTrue(metadata.exists())
 
     def test_project_runtime_gui_python_prefers_pythonw_on_windows(self):
         with TemporaryDirectory() as tmp:
@@ -420,6 +437,96 @@ class ProjectSceneTests(unittest.TestCase):
         self.assertEqual(world[3], 2)
         self.assertEqual(world[7], 3)
 
+    def test_child_world_transform_follows_parent_translation_rotation_and_scale(self):
+        parent = Entity("Parent")
+        child = Entity("Child")
+        parent.transform.position = Vec3(10.0, 0.0, 0.0)
+        parent.transform.rotation = Vec3(0.0, 90.0, 0.0)
+        parent.transform.scale = Vec3(2.0, 3.0, 4.0)
+        child.transform.position = Vec3(0.0, 0.0, -1.0)
+        child.transform.rotation = Vec3(0.0, 15.0, 0.0)
+        child.transform.scale = Vec3(0.5, 2.0, 1.0)
+        parent.add_child(child)
+
+        position = world_position(child)
+        self.assertAlmostEqual(position.x, 6.0)
+        self.assertAlmostEqual(position.y, 0.0)
+        self.assertAlmostEqual(position.z, 0.0)
+        self.assertEqual(world_rotation(child), Vec3(0.0, 105.0, 0.0))
+        self.assertEqual(world_scale(child), Vec3(1.0, 6.0, 4.0))
+
+    def test_set_world_position_writes_child_local_position(self):
+        parent = Entity("Parent")
+        child = parent.add_child(Entity("Child"))
+        parent.transform.position = Vec3(10.0, 0.0, 0.0)
+        parent.transform.rotation = Vec3(0.0, 90.0, 0.0)
+
+        set_world_position(child, Vec3(12.0, 3.0, 4.0))
+
+        self.assertAlmostEqual(world_position(child).x, 12.0)
+        self.assertAlmostEqual(world_position(child).y, 3.0)
+        self.assertAlmostEqual(world_position(child).z, 4.0)
+        self.assertNotEqual(child.transform.position, Vec3(12.0, 3.0, 4.0))
+
+    def test_world_direction_helpers_use_matrix_axes(self):
+        entity = Entity("Car")
+        entity.transform.rotation = Vec3(0.0, 90.0, 0.0)
+
+        self.assertAlmostEqual(world_forward(entity).x, -1.0)
+        self.assertAlmostEqual(world_forward(entity).z, 0.0, places=6)
+        self.assertAlmostEqual(world_right(entity).z, -1.0)
+        self.assertAlmostEqual(world_up(entity).y, 1.0)
+        self.assertEqual(local_to_world_direction(entity, Vec3(0.0, 0.0, -2.0)), world_forward(entity))
+        self.assertNotEqual(entity.transform.forward, Vec3.forward())
+        self.assertEqual(entity.transform.forward, world_forward(entity))
+        self.assertEqual(entity.transform.right, world_right(entity))
+        self.assertEqual(entity.transform.up, world_up(entity))
+
+    def test_child_world_forward_uses_combined_matrix_rotation(self):
+        parent = Entity("Parent")
+        child = parent.add_child(Entity("Child"))
+        parent.transform.rotation = Vec3(30.0, 45.0, 0.0)
+        child.transform.rotation = Vec3(0.0, 45.0, 0.0)
+
+        forward = world_forward(child)
+        right = world_right(child)
+        up = world_up(child)
+
+        self.assertAlmostEqual(forward.length(), 1.0)
+        self.assertAlmostEqual(right.length(), 1.0)
+        self.assertAlmostEqual(up.length(), 1.0)
+        self.assertAlmostEqual(forward.dot(right), 0.0, places=6)
+        self.assertNotEqual(forward, world_forward(parent))
+        self.assertEqual(child.transform.forward, forward)
+        self.assertNotEqual(child.transform.local_forward, forward)
+
+    def test_transform_owner_binding_survives_assignment_and_child_parenting(self):
+        parent = Entity("Parent")
+        child = parent.add_child(Entity("Child"))
+        replacement = Transform()
+
+        child.transform = replacement
+
+        self.assertIs(parent.transform.scene_object, parent)
+        self.assertIs(child.transform.scene_object, child)
+        self.assertIs(child.transform.sceneObject, child)
+        self.assertIs(replacement.scene_object, child)
+
+    def test_transform_point_helpers_roundtrip_through_hierarchy(self):
+        parent = Entity("Parent")
+        child = parent.add_child(Entity("Child"))
+        parent.transform.position = Vec3(10.0, 0.0, 0.0)
+        parent.transform.rotation = Vec3(0.0, 90.0, 0.0)
+        child.transform.position = Vec3(0.0, 2.0, -1.0)
+        local = Vec3(1.0, 2.0, 3.0)
+
+        world = child.transform.transform_point(local)
+        roundtripped = child.transform.inverse_transform_point(world)
+
+        self.assertAlmostEqual(roundtripped.x, local.x)
+        self.assertAlmostEqual(roundtripped.y, local.y)
+        self.assertAlmostEqual(roundtripped.z, local.z)
+
     def test_scene_serializes_components(self):
         root = Entity("Root")
         root.add_component(
@@ -429,6 +536,14 @@ class ProjectSceneTests(unittest.TestCase):
                 shader="assets/shaders/standard.shader",
                 source_materials=["Frame", "Glass"],
                 material_slots=["assets/materials/Door.material"],
+            )
+        )
+        root.add_component(
+            ModelRenderer(
+                model="model",
+                shader="assets/shaders/model.shader",
+                source_materials=["Frame"],
+                material_slots=["assets/materials/Frame.material"],
             )
         )
         root.add_component(ScriptComponent(scripts=[ScriptEntry(script="spin.py", class_name="Spin")]))
@@ -452,13 +567,87 @@ class ProjectSceneTests(unittest.TestCase):
         self.assertEqual(loaded.entities[0].components[0].shader, "assets/shaders/standard.shader")
         self.assertEqual(loaded.entities[0].components[0].source_materials, ["Frame", "Glass"])
         self.assertEqual(loaded.entities[0].components[0].material_slots, ["assets/materials/Door.material"])
-        self.assertEqual(loaded.entities[0].components[1].scripts[0].script, "spin.py")
-        physics = loaded.entities[0].components[2]
+        model = loaded.entities[0].components[1]
+        self.assertIsInstance(model, ModelRenderer)
+        self.assertEqual(model.model, "model")
+        self.assertEqual(model.shader, "assets/shaders/model.shader")
+        self.assertEqual(model.material_slots, ["assets/materials/Frame.material"])
+        self.assertEqual(loaded.entities[0].components[2].scripts[0].script, "spin.py")
+        physics = loaded.entities[0].components[3]
         self.assertIsInstance(physics, EntityPhysics)
         self.assertEqual(physics.mass, 2.0)
         self.assertFalse(physics.use_gravity)
         self.assertEqual(physics.velocity.to_list(), [1.0, 2.0, 3.0])
         self.assertEqual(physics.freeze_rotation.to_list(), [0.0, 1.0, 0.0])
+
+    def test_scene_serializes_sprite_ui_and_particle_components(self):
+        root = Entity("Root")
+        root.add_component(SpriteRenderer(texture="assets/textures/hero.png", alpha=0.5, flipbook_columns=4, flipbook_rows=2))
+        root.add_component(Canvas(sort_order=3, reference_resolution=Vec3(640, 480, 0), resolution_mode="fixed"))
+        root.add_component(UIImage(texture="assets/textures/hud.png", anchor="top-left", size=Vec3(64, 32, 0), fill_mode="fit"))
+        root.add_component(UIText(text="Score", font_source="asset", font_family="Arial", bitmap_font="assets/fonts/ui.ttf", font_size=18, anchor="top"))
+        root.add_component(ParticleEmitter(texture="assets/textures/spark.png", max_particles=16, rate=5.0, burst=3, blend_mode="additive"))
+        scene = Scene("FX", [root])
+
+        loaded = Scene.from_dict(scene.to_dict())
+
+        self.assertIsInstance(loaded.entities[0].components[0], SpriteRenderer)
+        self.assertEqual(loaded.entities[0].components[0].flipbook_columns, 4)
+        self.assertIsInstance(loaded.entities[0].components[1], Canvas)
+        self.assertEqual(loaded.entities[0].components[1].reference_resolution.to_list(), [640.0, 480.0, 0.0])
+        self.assertEqual(loaded.entities[0].components[1].resolution_mode, "fixed")
+        self.assertIsInstance(loaded.entities[0].components[2], UIImage)
+        self.assertEqual(loaded.entities[0].components[2].anchor, "top-left")
+        self.assertEqual(loaded.entities[0].components[2].fill_mode, "fit")
+        self.assertIsInstance(loaded.entities[0].components[3], UIText)
+        self.assertEqual(loaded.entities[0].components[3].text, "Score")
+        self.assertEqual(loaded.entities[0].components[3].font_source, "asset")
+        self.assertEqual(loaded.entities[0].components[3].bitmap_font, "assets/fonts/ui.ttf")
+        self.assertIsInstance(loaded.entities[0].components[4], ParticleEmitter)
+        self.assertEqual(loaded.entities[0].components[4].blend_mode, "additive")
+
+    def test_legacy_ui_fields_use_new_defaults(self):
+        scene = Scene.from_dict({
+            "name": "Legacy UI",
+            "entities": [{
+                "name": "Canvas",
+                "components": [
+                    {"type": "Canvas", "reference_resolution": [640, 480, 0]},
+                    {"type": "UIText", "text": "Ready", "font_family": "Arial"},
+                ],
+            }],
+        })
+
+        canvas = scene.entities[0].components[0]
+        text = scene.entities[0].components[1]
+
+        self.assertIsInstance(canvas, Canvas)
+        self.assertEqual(canvas.resolution_mode, "auto")
+        self.assertIsInstance(text, UIText)
+        self.assertEqual(text.font_source, "system")
+
+    def test_rect_transform_serializes_optionally(self):
+        entity = Entity("Button", rect_transform=RectTransform(anchor="top-left", offset=Vec3(10, 20, 0), size=Vec3(200, 48, 0)))
+        scene = Scene("UI", [entity])
+
+        data = scene.to_dict()
+        loaded = Scene.from_dict(data)
+        legacy = Scene.from_dict({"name": "Legacy", "entities": [{"name": "Old"}]})
+
+        self.assertIn("rect_transform", data["entities"][0])
+        self.assertIsNotNone(loaded.entities[0].rect_transform)
+        self.assertEqual(loaded.entities[0].rect_transform.size.to_list(), [200.0, 48.0, 0.0])
+        self.assertIsNone(legacy.entities[0].rect_transform)
+
+    def test_effective_active_respects_inactive_parent_without_overwriting_child(self):
+        parent = Entity("Parent", active=False)
+        child = parent.add_child(Entity("Child", components=[Camera()]))
+        scene = Scene("Active", [parent])
+
+        self.assertTrue(child.active)
+        self.assertFalse(entity_effectively_active(child))
+        self.assertEqual(list(scene.walk_active()), [])
+        self.assertIsNone(scene.active_camera())
 
     def test_active_audio_listener_uses_first_enabled_active_listener(self):
         inactive_entity = Entity("Inactive", active=False, components=[AudioListener()])
@@ -469,6 +658,15 @@ class ProjectSceneTests(unittest.TestCase):
         scene = Scene("Audio", [inactive_entity, disabled_listener, inactive_listener, active_listener, second_listener])
 
         self.assertIs(scene.active_audio_listener(), active_listener)
+
+    def test_active_audio_listener_ignores_inherited_inactive_listener(self):
+        parent = Entity("Parent", active=False)
+        child = parent.add_child(Entity("Child", components=[AudioListener()]))
+        fallback = Entity("Fallback", components=[AudioListener()])
+        scene = Scene("Audio", [parent, fallback])
+
+        self.assertTrue(child.active)
+        self.assertIs(scene.active_audio_listener(), fallback)
 
     def test_entity_serializes_persistent_flag(self):
         entity = Entity("Player", persistent=True)

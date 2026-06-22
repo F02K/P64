@@ -3,12 +3,29 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from p64.engine.shader import discover_shaders, parse_shader, shader_asset_id
-from p64.engine.builtin import standard_unlit_shader_source, standard_vertex_lit_shader_source
+from p64.engine.builtin import (
+    PARTICLE_MATERIAL_RELATIVE,
+    PARTICLE_SHADER_RELATIVE,
+    SKYBOX_SHADER_RELATIVE,
+    SPRITE_MATERIAL_RELATIVE,
+    SPRITE_SHADER_RELATIVE,
+    UI_IMAGE_MATERIAL_RELATIVE,
+    UI_IMAGE_SHADER_RELATIVE,
+    UI_TEXT_SHADER_RELATIVE,
+    ensure_builtin_package,
+    particle_shader_source,
+    sprite_shader_source,
+    standard_unlit_shader_source,
+    standard_vertex_lit_shader_source,
+    ui_image_shader_source,
+)
+from p64.engine.material import MaterialAsset, load_material_metadata
 from p64.renderer.shaders import (
     STANDARD_UNLIT_FRAGMENT_SHADER,
     STANDARD_UNLIT_VERTEX_SHADER,
     STANDARD_VERTEX_LIT_FRAGMENT_SHADER,
     STANDARD_VERTEX_LIT_VERTEX_SHADER,
+    UI_VERTEX_SHADER,
 )
 
 
@@ -81,6 +98,72 @@ class ShaderAssetTests(unittest.TestCase):
                 self.assertEqual(properties["u_alpha_cutoff"].default, 0.0)
                 self.assertEqual(properties["u_alpha_cutoff"].minimum, 0.0)
                 self.assertEqual(properties["u_alpha_cutoff"].maximum, 1.0)
+
+    def test_generated_sprite_and_particle_shaders_declare_material_properties(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sprite = root / "sprite.shader"
+            particle = root / "particle.shader"
+            sprite.write_text(sprite_shader_source(), encoding="utf-8")
+            particle.write_text(particle_shader_source(), encoding="utf-8")
+
+            for path in [sprite, particle]:
+                shader = parse_shader(path)
+                properties = {prop.name: prop for prop in shader.properties}
+                self.assertIn("u_texture", properties)
+                self.assertIn("u_base_color", properties)
+                self.assertIn("u_alpha", properties)
+                self.assertIn("u_alpha_cutoff", properties)
+
+    def test_builtin_package_writes_all_shader_files(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ensure_builtin_package(root)
+
+            for relative in [SPRITE_SHADER_RELATIVE, UI_IMAGE_SHADER_RELATIVE, UI_TEXT_SHADER_RELATIVE, PARTICLE_SHADER_RELATIVE, SKYBOX_SHADER_RELATIVE]:
+                shader_path = root / relative
+                self.assertTrue(shader_path.exists())
+                self.assertIn("gl_Position", parse_shader(shader_path).vertex)
+
+    def test_builtin_ui_shader_uses_direct_clipspace_positions(self):
+        self.assertNotIn("uniform mat4 u_projection", UI_VERTEX_SHADER)
+        self.assertNotIn("u_projection *", UI_VERTEX_SHADER)
+        self.assertIn("gl_Position = vec4(in_position.xy, 0.0, 1.0);", UI_VERTEX_SHADER)
+
+        shader = parse_shader(Path("samples/FirstScene/packages/P64Builtin/shaders/ui_image.shader"))
+        self.assertNotIn("uniform mat4 u_projection", shader.vertex)
+        self.assertNotIn("u_projection *", shader.vertex)
+        self.assertIn("gl_Position = vec4(in_position.xy, 0.0, 1.0);", shader.vertex)
+
+    def test_generated_ui_shader_uses_direct_clipspace_positions(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ui_image.shader"
+            path.write_text(ui_image_shader_source(), encoding="utf-8")
+            shader = parse_shader(path)
+
+            self.assertNotIn("uniform mat4 u_projection", shader.vertex)
+            self.assertIn("gl_Position = vec4(in_position.xy, 0.0, 1.0);", shader.vertex)
+
+    def test_builtin_package_writes_default_sprite_ui_particle_materials(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ensure_builtin_package(root)
+
+            expected = {
+                SPRITE_MATERIAL_RELATIVE: SPRITE_SHADER_RELATIVE,
+                UI_IMAGE_MATERIAL_RELATIVE: UI_IMAGE_SHADER_RELATIVE,
+                PARTICLE_MATERIAL_RELATIVE: PARTICLE_SHADER_RELATIVE,
+            }
+            for relative, shader in expected.items():
+                material_path = root / relative
+                self.assertTrue(material_path.exists())
+                material = MaterialAsset.load(material_path)
+                self.assertEqual(material.shader, shader)
+                self.assertEqual(material.properties["u_base_color"], [1.0, 1.0, 1.0])
+                metadata = load_material_metadata(material_path)
+                self.assertIsNotNone(metadata)
+                self.assertEqual(metadata.kind if metadata else "", "material")
+                self.assertEqual(metadata.source if metadata else "", relative)
 
     def test_discover_shader_assets_and_ids(self):
         root = Path("samples/FirstScene")

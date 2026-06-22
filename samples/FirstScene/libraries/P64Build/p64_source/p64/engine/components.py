@@ -39,6 +39,32 @@ class Transform:
 
 
 @dataclass(slots=True)
+class RectTransform:
+    anchor: str = "center"
+    offset: Vec3 = field(default_factory=Vec3)
+    size: Vec3 = field(default_factory=lambda: Vec3(160.0, 48.0, 0.0))
+    pivot: Vec3 = field(default_factory=lambda: Vec3(0.5, 0.5, 0.0))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "anchor": self.anchor,
+            "offset": self.offset.to_list(),
+            "size": self.size.to_list(),
+            "pivot": self.pivot.to_list(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "RectTransform":
+        data = data or {}
+        return cls(
+            anchor=str(data.get("anchor", "center")),
+            offset=Vec3.from_value(data.get("offset", [0.0, 0.0, 0.0])),
+            size=Vec3.from_value(data.get("size", [160.0, 48.0, 0.0])),
+            pivot=Vec3.from_value(data.get("pivot", [0.5, 0.5, 0.0])),
+        )
+
+
+@dataclass(slots=True)
 class Component:
     enabled: bool = True
 
@@ -69,6 +95,208 @@ class MeshRenderer(Component):
             "source_materials": self.source_materials,
             "material_slots": self.material_slots,
             "visible": self.visible,
+        })
+        return data
+
+
+@dataclass(slots=True)
+class SpriteRenderer(Component):
+    texture: str = ""
+    material: str | None = None
+    color: Vec3 = field(default_factory=lambda: Vec3(1.0, 1.0, 1.0))
+    alpha: float = 1.0
+    size: Vec3 = field(default_factory=lambda: Vec3(1.0, 1.0, 1.0))
+    pivot: Vec3 = field(default_factory=lambda: Vec3(0.5, 0.5, 0.0))
+    billboard: str = "camera"
+    sorting_layer: str = "Default"
+    sorting_order: int = 0
+    flipbook_columns: int = 1
+    flipbook_rows: int = 1
+    flipbook_fps: float = 0.0
+    flipbook_start: int = 0
+    flipbook_end: int = 0
+    type_name: str = "SpriteRenderer"
+
+    def to_dict(self) -> dict[str, Any]:
+        data = Component.to_dict(self)
+        data.update({
+            "texture": self.texture,
+            "material": self.material,
+            "color": self.color.to_list(),
+            "alpha": self.alpha,
+            "size": self.size.to_list(),
+            "pivot": self.pivot.to_list(),
+            "billboard": self.billboard,
+            "sorting_layer": self.sorting_layer,
+            "sorting_order": self.sorting_order,
+            "flipbook_columns": self.flipbook_columns,
+            "flipbook_rows": self.flipbook_rows,
+            "flipbook_fps": self.flipbook_fps,
+            "flipbook_start": self.flipbook_start,
+            "flipbook_end": self.flipbook_end,
+        })
+        return data
+
+
+@dataclass(slots=True)
+class Canvas(Component):
+    sort_order: int = 0
+    reference_resolution: Vec3 = field(default_factory=lambda: Vec3(1280.0, 720.0, 0.0))
+    resolution_mode: str = "auto"
+    type_name: str = "Canvas"
+
+    def to_dict(self) -> dict[str, Any]:
+        data = Component.to_dict(self)
+        data.update({
+            "sort_order": self.sort_order,
+            "reference_resolution": self.reference_resolution.to_list(),
+            "resolution_mode": self.resolution_mode,
+        })
+        return data
+
+
+@dataclass(slots=True)
+class UIImage(Component):
+    texture: str = ""
+    material: str | None = None
+    color: Vec3 = field(default_factory=lambda: Vec3(1.0, 1.0, 1.0))
+    alpha: float = 1.0
+    size: Vec3 = field(default_factory=lambda: Vec3(128.0, 128.0, 0.0))
+    anchor: str = "center"
+    offset: Vec3 = field(default_factory=Vec3)
+    pivot: Vec3 = field(default_factory=lambda: Vec3(0.5, 0.5, 0.0))
+    fill_mode: str = "simple"
+    flipbook_columns: int = 1
+    flipbook_rows: int = 1
+    flipbook_fps: float = 0.0
+    flipbook_start: int = 0
+    flipbook_end: int = 0
+    type_name: str = "UIImage"
+
+    def to_dict(self) -> dict[str, Any]:
+        data = Component.to_dict(self)
+        data.update({
+            "texture": self.texture,
+            "material": self.material,
+            "color": self.color.to_list(),
+            "alpha": self.alpha,
+            "size": self.size.to_list(),
+            "anchor": self.anchor,
+            "offset": self.offset.to_list(),
+            "pivot": self.pivot.to_list(),
+            "fill_mode": self.fill_mode,
+            "flipbook_columns": self.flipbook_columns,
+            "flipbook_rows": self.flipbook_rows,
+            "flipbook_fps": self.flipbook_fps,
+            "flipbook_start": self.flipbook_start,
+            "flipbook_end": self.flipbook_end,
+        })
+        return data
+
+
+@dataclass(slots=True)
+class UIText(Component):
+    text: str = "Text"
+    font_source: str = "system"
+    font_family: str = "System"
+    bitmap_font: str = ""
+    font_size: float = 24.0
+    color: Vec3 = field(default_factory=lambda: Vec3(1.0, 1.0, 1.0))
+    alpha: float = 1.0
+    alignment: str = "center"
+    anchor: str = "center"
+    offset: Vec3 = field(default_factory=Vec3)
+    pivot: Vec3 = field(default_factory=lambda: Vec3(0.5, 0.5, 0.0))
+    type_name: str = "UIText"
+
+    def to_dict(self) -> dict[str, Any]:
+        data = Component.to_dict(self)
+        data.update({
+            "text": self.text,
+            "font_source": self.font_source,
+            "font_family": self.font_family,
+            "bitmap_font": self.bitmap_font,
+            "font_size": self.font_size,
+            "color": self.color.to_list(),
+            "alpha": self.alpha,
+            "alignment": self.alignment,
+            "anchor": self.anchor,
+            "offset": self.offset.to_list(),
+            "pivot": self.pivot.to_list(),
+        })
+        return data
+
+
+@dataclass(slots=True)
+class ParticleEmitter(Component):
+    material: str | None = None
+    texture: str = ""
+    max_particles: int = 128
+    rate: float = 12.0
+    burst: int = 0
+    lifetime: float = 1.0
+    start_size: float = 0.25
+    start_color: Vec3 = field(default_factory=lambda: Vec3(1.0, 1.0, 1.0))
+    start_alpha: float = 1.0
+    start_velocity: Vec3 = field(default_factory=lambda: Vec3(0.0, 1.0, 0.0))
+    gravity: Vec3 = field(default_factory=Vec3)
+    local_space: bool = False
+    looping: bool = True
+    play_on_awake: bool = True
+    blend_mode: str = "alpha"
+    flipbook_columns: int = 1
+    flipbook_rows: int = 1
+    flipbook_fps: float = 0.0
+    flipbook_start: int = 0
+    flipbook_end: int = 0
+    _runtime_playing: bool = field(default=True, repr=False, compare=False)
+    _runtime_particles: list[dict[str, Any]] = field(default_factory=list, repr=False, compare=False)
+    _runtime_accumulator: float = field(default=0.0, repr=False, compare=False)
+    _runtime_burst_done: bool = field(default=False, repr=False, compare=False)
+    type_name: str = "ParticleEmitter"
+
+    def play(self) -> None:
+        self._runtime_playing = True
+
+    def stop(self) -> None:
+        self._runtime_playing = False
+        self._runtime_accumulator = 0.0
+
+    def emit(self, count: int) -> None:
+        for _index in range(max(0, int(count))):
+            if len(self._runtime_particles) >= max(0, int(self.max_particles)):
+                return
+            self._runtime_particles.append({
+                "age": 0.0,
+                "lifetime": max(0.001, float(self.lifetime)),
+                "position": Vec3(),
+                "velocity": Vec3(self.start_velocity.x, self.start_velocity.y, self.start_velocity.z),
+                "size": max(0.001, float(self.start_size)),
+            })
+
+    def to_dict(self) -> dict[str, Any]:
+        data = Component.to_dict(self)
+        data.update({
+            "material": self.material,
+            "texture": self.texture,
+            "max_particles": self.max_particles,
+            "rate": self.rate,
+            "burst": self.burst,
+            "lifetime": self.lifetime,
+            "start_size": self.start_size,
+            "start_color": self.start_color.to_list(),
+            "start_alpha": self.start_alpha,
+            "start_velocity": self.start_velocity.to_list(),
+            "gravity": self.gravity.to_list(),
+            "local_space": self.local_space,
+            "looping": self.looping,
+            "play_on_awake": self.play_on_awake,
+            "blend_mode": self.blend_mode,
+            "flipbook_columns": self.flipbook_columns,
+            "flipbook_rows": self.flipbook_rows,
+            "flipbook_fps": self.flipbook_fps,
+            "flipbook_start": self.flipbook_start,
+            "flipbook_end": self.flipbook_end,
         })
         return data
 
@@ -391,6 +619,90 @@ def component_from_dict(data: dict[str, Any]) -> Component:
             material_slots=list(data.get("material_slots", [])),
             visible=bool(data.get("visible", True)),
         )
+    if kind == "SpriteRenderer":
+        return SpriteRenderer(
+            enabled=enabled,
+            texture=str(data.get("texture", "")),
+            material=data.get("material"),
+            color=Vec3.from_value(data.get("color", [1.0, 1.0, 1.0])),
+            alpha=float(data.get("alpha", 1.0)),
+            size=Vec3.from_value(data.get("size", [1.0, 1.0, 1.0])),
+            pivot=Vec3.from_value(data.get("pivot", [0.5, 0.5, 0.0])),
+            billboard=str(data.get("billboard", "camera")),
+            sorting_layer=str(data.get("sorting_layer", "Default")),
+            sorting_order=int(data.get("sorting_order", 0)),
+            flipbook_columns=int(data.get("flipbook_columns", 1)),
+            flipbook_rows=int(data.get("flipbook_rows", 1)),
+            flipbook_fps=float(data.get("flipbook_fps", 0.0)),
+            flipbook_start=int(data.get("flipbook_start", 0)),
+            flipbook_end=int(data.get("flipbook_end", 0)),
+        )
+    if kind == "Canvas":
+        return Canvas(
+            enabled=enabled,
+            sort_order=int(data.get("sort_order", 0)),
+            reference_resolution=Vec3.from_value(data.get("reference_resolution", [1280.0, 720.0, 0.0])),
+            resolution_mode=_choice(data.get("resolution_mode", "auto"), {"auto", "fixed"}, "auto"),
+        )
+    if kind == "UIImage":
+        return UIImage(
+            enabled=enabled,
+            texture=str(data.get("texture", "")),
+            material=data.get("material"),
+            color=Vec3.from_value(data.get("color", [1.0, 1.0, 1.0])),
+            alpha=float(data.get("alpha", 1.0)),
+            size=Vec3.from_value(data.get("size", [128.0, 128.0, 0.0])),
+            anchor=str(data.get("anchor", "center")),
+            offset=Vec3.from_value(data.get("offset", [0.0, 0.0, 0.0])),
+            pivot=Vec3.from_value(data.get("pivot", [0.5, 0.5, 0.0])),
+            fill_mode=str(data.get("fill_mode", "simple")),
+            flipbook_columns=int(data.get("flipbook_columns", 1)),
+            flipbook_rows=int(data.get("flipbook_rows", 1)),
+            flipbook_fps=float(data.get("flipbook_fps", 0.0)),
+            flipbook_start=int(data.get("flipbook_start", 0)),
+            flipbook_end=int(data.get("flipbook_end", 0)),
+        )
+    if kind == "UIText":
+        return UIText(
+            enabled=enabled,
+            text=str(data.get("text", "Text")),
+            font_source=_choice(data.get("font_source", "system"), {"system", "asset"}, "system"),
+            font_family=str(data.get("font_family", "System")),
+            bitmap_font=str(data.get("bitmap_font", "")),
+            font_size=float(data.get("font_size", 24.0)),
+            color=Vec3.from_value(data.get("color", [1.0, 1.0, 1.0])),
+            alpha=float(data.get("alpha", 1.0)),
+            alignment=str(data.get("alignment", "center")),
+            anchor=str(data.get("anchor", "center")),
+            offset=Vec3.from_value(data.get("offset", [0.0, 0.0, 0.0])),
+            pivot=Vec3.from_value(data.get("pivot", [0.5, 0.5, 0.0])),
+        )
+    if kind == "ParticleEmitter":
+        emitter = ParticleEmitter(
+            enabled=enabled,
+            material=data.get("material"),
+            texture=str(data.get("texture", "")),
+            max_particles=int(data.get("max_particles", 128)),
+            rate=float(data.get("rate", 12.0)),
+            burst=int(data.get("burst", 0)),
+            lifetime=float(data.get("lifetime", 1.0)),
+            start_size=float(data.get("start_size", 0.25)),
+            start_color=Vec3.from_value(data.get("start_color", [1.0, 1.0, 1.0])),
+            start_alpha=float(data.get("start_alpha", 1.0)),
+            start_velocity=Vec3.from_value(data.get("start_velocity", [0.0, 1.0, 0.0])),
+            gravity=Vec3.from_value(data.get("gravity", [0.0, 0.0, 0.0])),
+            local_space=bool(data.get("local_space", False)),
+            looping=bool(data.get("looping", True)),
+            play_on_awake=bool(data.get("play_on_awake", True)),
+            blend_mode=str(data.get("blend_mode", "alpha")),
+            flipbook_columns=int(data.get("flipbook_columns", 1)),
+            flipbook_rows=int(data.get("flipbook_rows", 1)),
+            flipbook_fps=float(data.get("flipbook_fps", 0.0)),
+            flipbook_start=int(data.get("flipbook_start", 0)),
+            flipbook_end=int(data.get("flipbook_end", 0)),
+        )
+        emitter._runtime_playing = emitter.play_on_awake
+        return emitter
     if kind == "Camera":
         return Camera(
             enabled=enabled,
@@ -495,3 +807,8 @@ def component_from_dict(data: dict[str, Any]) -> Component:
             scripts=scripts,
         )
     return Component(enabled=enabled)
+
+
+def _choice(value: object, allowed: set[str], default: str) -> str:
+    text = str(value or default)
+    return text if text in allowed else default

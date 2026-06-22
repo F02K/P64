@@ -5,9 +5,10 @@ from math import floor, sqrt
 from typing import Any
 
 from p64.engine.components import CharacterController, Collider, EntityPhysics
-from p64.engine.entity import Entity
+from p64.engine.entity import Entity, entity_effectively_active
 from p64.engine.math import Vec3
 from p64.engine.mesh_geometry import bounds_from_points, convex_hull, ensure_mesh_collision_metadata, mesh_bounds, mesh_renderer_for, mesh_triangles, transform_point, transform_triangle, transformed_bounds
+from p64.engine.transforms import world_position
 
 
 @dataclass(slots=True)
@@ -68,9 +69,7 @@ class CollisionWorld:
         dynamic_colliders: list[tuple[Entity, Collider]] = []
         dynamic_proxies: list[ColliderProxy] = []
         dynamic_by_collider: dict[int, ColliderProxy] = {}
-        for entity in self.scene.walk():
-            if not entity.active:
-                continue
+        for entity in self.scene.walk_active():
             if entity.is_game_object:
                 continue
             for component in entity.components:
@@ -92,8 +91,8 @@ class CollisionWorld:
             self._rebuild_dynamic_frame_cache()
 
     def _build_static_colliders(self) -> None:
-        for entity in self.scene.walk():
-            if not entity.active or not entity.is_game_object:
+        for entity in self.scene.walk_active():
+            if not entity.is_game_object:
                 continue
             for component in entity.components:
                 if not isinstance(component, Collider) or not component.enabled:
@@ -194,9 +193,7 @@ class CollisionWorld:
     def step_physics(self, dt: float) -> None:
         dt = max(float(dt), 0.0)
         physics_bodies: list[tuple[Entity, EntityPhysics]] = []
-        for entity in self.scene.walk():
-            if not entity.active:
-                continue
+        for entity in self.scene.walk_active():
             physics = _entity_physics(entity)
             if physics is None or not physics.enabled:
                 continue
@@ -348,7 +345,7 @@ class CollisionWorld:
         colliders = [
             (owner, component)
             for owner in entity.walk()
-            if owner.active and not owner.is_game_object
+            if entity_effectively_active(owner) and not owner.is_game_object
             for component in owner.components
             if isinstance(component, Collider) and component.enabled
         ]
@@ -491,7 +488,7 @@ def apply_mesh_primitive_defaults(project: Any | None, entity: Entity, collider:
 
 
 def controller_bounds(entity: Entity, controller: CharacterController) -> Bounds:
-    position = entity.transform.position
+    position = world_position(entity)
     radius = max(controller.radius - controller.skin_width, 0.001)
     height = max(controller.height, radius * 2.0)
     return Bounds(
@@ -582,7 +579,7 @@ def _grid_cells(bounds: Bounds, cell_size: float) -> list[tuple[int, int, int]]:
 def _entity_colliders(entity: Entity) -> list[tuple[Entity, Collider]]:
     colliders: list[tuple[Entity, Collider]] = []
     def collect(owner: Entity, is_root: bool = False) -> None:
-        if not owner.active:
+        if not entity_effectively_active(owner):
             return
         physics = _entity_physics(owner)
         if not is_root and physics is not None and physics.enabled:

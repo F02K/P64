@@ -2,8 +2,11 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from p64.editor.inspectors.components import project_texture_reference, texture_image_paths
+from p64.editor.inspectors.components import font_asset_paths, project_texture_reference, texture_image_paths
+from p64.editor.dialogs.lighting_settings import apply_lighting_settings
+from p64.editor.panels.console import ConsoleLogModel, infer_console_level
 from p64.engine.project import Project
+from p64.engine.scene import Scene
 
 
 class EditorImportTests(unittest.TestCase):
@@ -224,6 +227,20 @@ class EditorImportTests(unittest.TestCase):
             self.assertEqual([path.name for path in paths], ["albedo.png", "checker.bmp"])
             self.assertEqual(project_texture_reference(project, image), "assets/albedo.png")
 
+    def test_font_picker_finds_font_assets_and_packages(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            font = project.assets_dir / "ui.ttf"
+            font.write_bytes(b"not really a font")
+            package_font = project.packages_dir / "Fonts" / "hud.otf"
+            package_font.parent.mkdir(parents=True)
+            package_font.write_bytes(b"font")
+            (project.assets_dir / "note.txt").write_text("skip", encoding="utf-8")
+
+            paths = font_asset_paths(project)
+
+            self.assertEqual([path.name for path in paths], ["ui.ttf", "hud.otf"])
+
     def test_shader_texture_properties_use_texture_picker(self):
         source = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
         material_fields = source[source.index("def _add_material_editor_fields"):source.index("def _add_material_slots_editor")]
@@ -232,6 +249,179 @@ class EditorImportTests(unittest.TestCase):
         self.assertIn("self._texture_editor", material_fields)
         self.assertIn("def _choose_texture_reference", source)
         self.assertIn("QListView.ViewMode.IconMode", source)
+
+    def test_sprite_ui_particle_editors_use_asset_pickers_and_material_combo(self):
+        source = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
+        sprite_editor = source[source.index("def _add_sprite_renderer_editor"):source.index("def _add_canvas_editor")]
+        ui_editor = source[source.index("def _add_ui_image_editor"):source.index("def _add_ui_text_editor")]
+        text_editor = source[source.index("def _add_ui_text_editor"):source.index("def _add_particle_emitter_editor")]
+        particle_editor = source[source.index("def _add_particle_emitter_editor"):source.index("def _add_flipbook_rows")]
+        reset = source[source.index("def _reset_component"):source.index("def _remove_component")]
+
+        for editor in [sprite_editor, ui_editor, particle_editor]:
+            self.assertIn("_component_texture_editor", editor)
+            self.assertIn("_component_material_editor", editor)
+            self.assertNotIn("material = QLineEdit", editor)
+        self.assertIn('"Fill Mode"', ui_editor)
+        self.assertIn('"Stretch"', ui_editor)
+        self.assertIn('"Fit"', ui_editor)
+        self.assertIn('"Fill"', ui_editor)
+        self.assertIn('"fill_mode"', ui_editor)
+        self.assertIn("_font_asset_editor", text_editor)
+        self.assertIn('"Font Source"', text_editor)
+        self.assertIn('"System Font"', text_editor)
+        self.assertIn('"Font Asset"', text_editor)
+        self.assertIn("font_family_editor.setEnabled", text_editor)
+        self.assertIn("font_asset_editor.setEnabled", text_editor)
+        self.assertIn("self.project.packages_dir", source[source.index("def _material_choices"):source.index("def _audio_clip_choices")])
+        self.assertIn("SpriteRenderer(material=SPRITE_MATERIAL_RELATIVE)", reset)
+        self.assertIn("UIImage(material=UI_IMAGE_MATERIAL_RELATIVE)", reset)
+        self.assertIn("ParticleEmitter(material=PARTICLE_MATERIAL_RELATIVE)", reset)
+
+    def test_canvas_editor_exposes_resolution_mode(self):
+        source = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
+        canvas_editor = source[source.index("def _add_canvas_editor"):source.index("def _add_ui_image_editor")]
+
+        self.assertIn('"Resolution Mode"', canvas_editor)
+        self.assertIn('"auto"', canvas_editor)
+        self.assertIn('"fixed"', canvas_editor)
+        self.assertIn('"resolution_mode"', canvas_editor)
+
+    def test_rect_transform_editor_explains_outer_ui_bounds(self):
+        source = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
+        rect_editor = source[source.index("def _add_rect_transform_editor"):source.index("def _add_script_component_editor")]
+
+        self.assertIn("outer UI bounds", rect_editor)
+        self.assertIn('"Bounds"', rect_editor)
+
+    def test_viewport_draws_selected_ui_bounds_overlay_in_game_view(self):
+        source = Path("src/p64/editor/viewport.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _draw_ui_bounds_overlay", source)
+        self.assertIn("ui_layout_debug", source)
+        self.assertIn("_draw_rect_outline", source)
+        self.assertIn("self._draw_ui_bounds_overlay(scene, selected)", source)
+
+    def test_ui_text_font_family_uses_system_font_picker(self):
+        source = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
+        text_editor = source[source.index("def _add_ui_text_editor"):source.index("def _add_particle_emitter_editor")]
+        font_family_editor = source[source.index("def _font_family_editor"):source.index("def _texture_editor")]
+
+        self.assertIn("self._font_family_editor(component)", text_editor)
+        self.assertNotIn("font = QLineEdit(component.font_family", text_editor)
+        self.assertIn("QFontDatabase.families()", font_family_editor)
+        self.assertIn("combo.setEditable(True)", font_family_editor)
+        self.assertIn('"System"', font_family_editor)
+
+    def test_console_log_model_collapses_exact_duplicate_messages(self):
+        model = ConsoleLogModel()
+
+        model.add("UI batch render failed: boom", 1.0)
+        model.add("UI batch render failed: boom", 2.0)
+
+        rows = model.rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].count, 2)
+        self.assertEqual(rows[0].first_seen, 1.0)
+        self.assertEqual(rows[0].last_seen, 2.0)
+        self.assertEqual(rows[0].level, "Error")
+
+    def test_console_log_model_uses_exact_message_for_duplicates(self):
+        model = ConsoleLogModel()
+
+        model.add("Missing texture: assets/a.png", 1.0)
+        model.add("Missing texture: assets/b.png", 2.0)
+
+        rows = model.rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([row.count for row in rows], [1, 1])
+        self.assertEqual(infer_console_level("Missing texture"), "Warning")
+
+    def test_editor_log_routes_to_console_panel(self):
+        source = Path("src/p64/editor/main_window.py").read_text(encoding="utf-8")
+        log_method = source[source.index("def _log"):source.index("app = QApplication")]
+
+        self.assertIn("create_console_panel", source)
+        self.assertIn("ConsolePanel", source)
+        self.assertIn("self.console.add_log(text)", log_method)
+        self.assertNotIn("appendPlainText", log_method)
+
+    def test_window_menu_exposes_lighting_and_analysis(self):
+        source = Path("src/p64/editor/main_window.py").read_text(encoding="utf-8")
+
+        self.assertIn('addMenu("Window")', source)
+        self.assertIn('"Lighting Settings"', source)
+        self.assertIn('"Analysis"', source)
+        self.assertIn("open_lighting_settings_dialog", source)
+        self.assertIn("AnalysisPanel", source)
+        self.assertIn("ProfilerRecorder", source)
+
+    def test_analysis_panel_is_top_level_window(self):
+        source = Path("src/p64/editor/panels/analysis.py").read_text(encoding="utf-8")
+
+        self.assertIn("super().__init__(parent, Qt.Window)", source)
+        self.assertIn("QTabWidget", source)
+        self.assertIn('addTab(self.overview, "Overview")', source)
+        self.assertIn('addTab(self.runtime, "Runtime")', source)
+        self.assertIn('addTab(self.render, "Render")', source)
+        self.assertIn('addTab(self.counts, "Counts")', source)
+        main_window = Path("src/p64/editor/main_window.py").read_text(encoding="utf-8")
+        self.assertIn("QTabWidget", main_window)
+
+    def test_viewport_accepts_profiler_getter(self):
+        source = Path("src/p64/editor/viewport.py").read_text(encoding="utf-8")
+
+        self.assertIn("profiler_getter", source)
+        self.assertIn("profiler.begin_frame", source)
+        self.assertIn("renderer.profiler_recorder", source)
+
+    def test_editor_uses_precise_timer_and_unthrottled_swap(self):
+        main_window = Path("src/p64/editor/main_window.py").read_text(encoding="utf-8")
+        runtime_window = Path("src/p64/editor/runtime_window.py").read_text(encoding="utf-8")
+
+        self.assertIn("surface_format.setSwapInterval(0)", main_window)
+        self.assertIn("self.repaint_timer.setTimerType(Qt.PreciseTimer)", main_window)
+        self.assertIn("surface_format.setSwapInterval(0)", runtime_window)
+        self.assertIn("timer.setTimerType(Qt.PreciseTimer)", runtime_window)
+
+    def test_profiler_tick_and_paint_frames_are_separated(self):
+        main_window = Path("src/p64/editor/main_window.py").read_text(encoding="utf-8")
+        tick_method = main_window[main_window.index("def _tick_viewport"):main_window.index("def _viewport_scene")]
+        viewport = Path("src/p64/editor/viewport.py").read_text(encoding="utf-8")
+        paint_method = viewport[viewport.index("def paintGL"):viewport.index("def reload_assets")]
+
+        self.assertIn('frame = profiler.begin_frame("Editor")', tick_method)
+        self.assertIn("finally:", tick_method)
+        self.assertIn("profiler.end_frame(frame)", tick_method)
+        self.assertNotIn("end_current_frame", tick_method)
+        self.assertIn("owns_frame", paint_method)
+        self.assertIn("paint_profiler", paint_method)
+        self.assertIn("if profiler.current_frame() is None:", paint_method)
+        self.assertIn("self.renderer.profiler_recorder = paint_profiler", paint_method)
+        self.assertIn('with _profiler_section(paint_profiler, "viewport paint")', paint_method)
+        self.assertIn("if owns_frame and profiler is not None:", paint_method)
+
+    def test_game_view_does_not_send_selection_outline_to_renderer(self):
+        source = Path("src/p64/editor/viewport.py").read_text(encoding="utf-8")
+
+        self.assertIn('selected_entity_id=selected.id if selected and self.view_mode != "Game" else None', source)
+        self.assertIn("self._draw_ui_bounds_overlay(scene, selected)", source)
+
+    def test_lighting_settings_helper_updates_scene_render_settings(self):
+        scene = Scene("Lighting")
+
+        settings = apply_lighting_settings(scene, {
+            "skybox_enabled": False,
+            "fog": False,
+            "skybox_cloud_coverage": 2.0,
+            "skybox_cloud_softness": -1.0,
+        })
+
+        self.assertFalse(settings["skybox_enabled"])
+        self.assertFalse(settings["fog"])
+        self.assertEqual(settings["skybox_cloud_coverage"], 1.0)
+        self.assertEqual(settings["skybox_cloud_softness"], 0.0)
+        self.assertIs(scene.render_settings, settings)
 
     def test_asset_browser_uses_image_thumbnails(self):
         source = Path("src/p64/editor/panels/assets.py").read_text(encoding="utf-8")
@@ -287,3 +477,25 @@ class EditorImportTests(unittest.TestCase):
         self.assertIn("Choose another startup scene before deleting this scene", delete_method)
         self.assertIn("is_project_startup_scene", delete_method)
         self.assertIn("_asset_path_contains", delete_method)
+
+    def test_hierarchy_preserves_state_and_disables_entity_actions_without_selection(self):
+        source = Path("src/p64/editor/panels/hierarchy.py").read_text(encoding="utf-8")
+        populate = source[source.index("def _populate_hierarchy"):source.index("def _entity_item")]
+        menu = source[source.index("def _show_hierarchy_menu"):source.index("def _virtual_submesh_labels")]
+
+        self.assertIn("_expanded_hierarchy_ids", populate)
+        self.assertIn("_restore_hierarchy_expanded_ids", populate)
+        self.assertIn("blockSignals(True)", populate)
+        self.assertIn("has_entity", menu)
+        self.assertIn("setEnabled(has_entity)", menu)
+        self.assertIn("virtual_submesh_labels", source)
+
+    def test_hierarchy_and_inspector_expose_inherited_inactive_and_rect_transform(self):
+        hierarchy = Path("src/p64/editor/panels/hierarchy.py").read_text(encoding="utf-8")
+        inspector = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
+        transform_editor = inspector[inspector.index("def _add_transform_editor"):inspector.index("def _add_script_component_editor")]
+
+        self.assertIn("entity_effectively_active", hierarchy)
+        self.assertIn("Inherited Inactive", hierarchy)
+        self.assertIn("Rect Transform", transform_editor)
+        self.assertIn("self.selected.rect_transform is not None", transform_editor)

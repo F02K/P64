@@ -8,6 +8,7 @@ from p64.engine.input import InputState, normalize_mouse_button, normalize_qt_ke
 from p64.engine.math import Vec3
 from p64.engine.project import Project
 from p64.engine.scene import Scene
+from p64.engine.transforms import world_position
 from p64.editor.gizmos import AXIS_COLORS, AXIS_VECTORS, GizmoHandle, ScreenPoint, apply_gizmo_drag, axis_screen_direction, hit_test_gizmo, scale_handle_radius, transform_snapshot
 from p64.editor.utils.math import _add_vec3, _lerp_vec3, _normalize_vec3, _scale_vec3, _sub_vec3, _vec3_length
 from p64.renderer.scene_renderer import RenderCamera, camera_basis, dot
@@ -54,6 +55,8 @@ def create_viewport_class(QOpenGLWidget: Any, QWidget: Any, QLabel: Any, QVBoxLa
                 self._applied_cursor_mode = "normal"
                 self.transform_tool = "move"
                 self.gizmo_drag: dict[str, Any] | None = None
+                self.missing_game_camera = False
+                self.logged_missing_game_camera = False
                 self.setFocusPolicy(Qt.StrongFocus)
                 self.setMouseTracking(True)
 
@@ -93,14 +96,23 @@ def create_viewport_class(QOpenGLWidget: Any, QWidget: Any, QLabel: Any, QVBoxLa
                         self.renderer_project = project
                     camera = self.scene_camera if self.view_mode == "Scene" else None
                     selected = self.selected_getter()
-                    self.renderer.render(
+                    self.missing_game_camera = not self.renderer.render(
                         scene,
                         self.width(),
                         self.height(),
                         camera=camera,
                         selected_entity_id=selected.id if selected else None,
                         show_grid=self.view_mode == "Scene",
+                        game_view=self.view_mode == "Game",
+                        output_framebuffer=self.qt_framebuffer,
                     )
+                    if self.missing_game_camera and not self.logged_missing_game_camera:
+                        self.logger("Game view camera missing: add an active Camera component to an active entity.")
+                        self.logged_missing_game_camera = True
+                    elif not self.missing_game_camera:
+                        self.logged_missing_game_camera = False
+                    self._draw_game_camera_overlay()
+                    self._draw_ui_bounds_overlay(scene, selected)
                     self._draw_gizmo_overlay(selected)
                 except Exception as exc:
                     self.ctx.clear(0.16, 0.18, 0.21, 1.0)
@@ -386,6 +398,43 @@ def create_viewport_class(QOpenGLWidget: Any, QWidget: Any, QLabel: Any, QVBoxLa
                 except Exception as exc:
                     self.logger(f"Gizmo overlay failed: {exc}")
 
+            def _draw_game_camera_overlay(self) -> None:
+                if self.view_mode != "Game" or not self.missing_game_camera:
+                    return
+                try:
+                    from PySide6.QtGui import QColor, QPainter, QPen
+
+                    painter = QPainter(self)
+                    painter.setPen(QPen(QColor(220, 224, 230), 1))
+                    painter.drawText(self.rect(), Qt.AlignCenter, "No active camera")
+                    painter.end()
+                except Exception as exc:
+                    self.logger(f"Game camera overlay failed: {exc}")
+
+            def _draw_ui_bounds_overlay(self, scene: Scene, selected: Entity | None) -> None:
+                if self.view_mode != "Game" or selected is None or selected.rect_transform is None:
+                    return
+                try:
+                    from PySide6.QtGui import QColor, QPainter, QPen
+                    from p64.renderer.scene_renderer import ui_layout_debug
+
+                    entry = next((item for item in ui_layout_debug(scene, self.width(), self.height()) if item.entity_id == selected.id), None)
+                    if entry is None:
+                        return
+                    painter = QPainter(self)
+                    painter.setRenderHint(QPainter.Antialiasing, False)
+                    painter.setPen(QPen(QColor(255, 218, 82), 1))
+                    _draw_rect_outline(painter, entry.rect)
+                    painter.setPen(QPen(QColor(74, 175, 255), 1))
+                    for rect in entry.image_rects:
+                        _draw_rect_outline(painter, rect)
+                    painter.setPen(QPen(QColor(156, 255, 132), 1))
+                    for rect in entry.text_rects:
+                        _draw_rect_outline(painter, rect)
+                    painter.end()
+                except Exception as exc:
+                    self.logger(f"UI bounds overlay failed: {exc}")
+
             def _gizmo_handles(self, selected: Entity) -> list[GizmoHandle]:
                 origin = _world_position(selected)
                 center = self._project_world(origin)
@@ -514,8 +563,7 @@ def create_viewport_class(QOpenGLWidget: Any, QWidget: Any, QLabel: Any, QVBoxLa
 
 
 def _world_position(entity: Entity) -> Vec3:
-    matrix = entity.transform.world_matrix(entity)
-    return Vec3(matrix[3], matrix[7], matrix[11])
+    return world_position(entity)
 
 
 def _view_matrix(camera: RenderCamera) -> list[float]:
@@ -563,3 +611,8 @@ def _event_xy(event: Any) -> tuple[float, float]:
     except Exception:
         position = event.pos()
     return float(position.x()), float(position.y())
+
+
+def _draw_rect_outline(painter: Any, rect: tuple[float, float, float, float]) -> None:
+    x, y, width, height = rect
+    painter.drawRect(int(round(x)), int(round(y)), int(round(width)), int(round(height)))

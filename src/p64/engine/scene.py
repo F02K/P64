@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from p64.engine.components import AudioListener, Camera, Fog, Light, ScriptComponent
-from p64.engine.entity import Entity
+from p64.engine.entity import Entity, entity_effectively_active
 from p64.engine.render_settings import clamp_render_settings, default_render_settings
 
 
@@ -23,6 +23,11 @@ class Scene:
     def walk(self) -> Iterable[Entity]:
         for entity in self.entities:
             yield from entity.walk()
+
+    def walk_active(self) -> Iterable[Entity]:
+        for entity in self.walk():
+            if entity_effectively_active(entity):
+                yield entity
 
     def find(self, entity_id: str) -> Entity | None:
         for entity in self.entities:
@@ -50,9 +55,7 @@ class Scene:
 
     def active_camera(self) -> Entity | None:
         fallback = None
-        for entity in self.walk():
-            if not entity.active:
-                continue
+        for entity in self.walk_active():
             for component in entity.components:
                 if isinstance(component, Camera):
                     fallback = fallback or entity
@@ -61,9 +64,7 @@ class Scene:
         return fallback
 
     def active_audio_listener(self) -> Entity | None:
-        for entity in self.walk():
-            if not entity.active:
-                continue
+        for entity in self.walk_active():
             for component in entity.components:
                 if isinstance(component, AudioListener) and component.enabled and component.active:
                     return entity
@@ -72,9 +73,9 @@ class Scene:
     def lights(self) -> list[tuple[Entity, Light]]:
         return [
             (entity, component)
-            for entity in self.walk()
+            for entity in self.walk_active()
             for component in entity.components
-            if entity.active and isinstance(component, Light) and component.enabled
+            if isinstance(component, Light) and component.enabled
         ]
 
     def fog(self) -> Fog | None:
@@ -82,9 +83,7 @@ class Scene:
         return volume[1] if volume else None
 
     def fog_volume(self) -> tuple[Entity, Fog] | None:
-        for entity in self.walk():
-            if not entity.active:
-                continue
+        for entity in self.walk_active():
             for component in entity.components:
                 if isinstance(component, Fog) and component.enabled:
                     return entity, component
@@ -93,9 +92,9 @@ class Scene:
     def script_components(self) -> list[tuple[Entity, ScriptComponent]]:
         return [
             (entity, component)
-            for entity in self.walk()
+            for entity in self.walk_active()
             for component in entity.components
-            if entity.active and isinstance(component, ScriptComponent) and component.enabled
+            if entity.is_entity and isinstance(component, ScriptComponent) and component.enabled
         ]
 
     def to_dict(self) -> dict[str, Any]:

@@ -59,9 +59,7 @@ class SceneManager:
 
     def _select_spawn_point(self, scene: Scene, spawn_id: str | None) -> Entity | None:
         spawns: list[tuple[Entity, SpawnPoint]] = []
-        for entity in scene.walk():
-            if not entity.active:
-                continue
+        for entity in scene.walk_active():
             for component in entity.components:
                 if isinstance(component, SpawnPoint) and component.enabled:
                     spawns.append((entity, component))

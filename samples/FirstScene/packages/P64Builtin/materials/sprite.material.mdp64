@@ -1,0 +1,10 @@
+{
+  "id": "material_sprite",
+  "kind": "material",
+  "source": "packages/P64Builtin/materials/sprite.material",
+  "groups": [],
+  "materials": [],
+  "settings": {
+    "builtin": true
+  }
+}

@@ -14,6 +14,7 @@ from p64.editor.dialogs.project_settings import open_project_settings_dialog
 from p64.editor.inspectors.components import create_inspector_mixin
 from p64.editor.ops import DirtyTracker, update_material_usage_cache
 from p64.editor.panels.assets import create_asset_browser_mixin
+from p64.editor.panels.console import create_console_panel
 from p64.editor.panels.hierarchy import create_hierarchy_mixin
 from p64.editor.undo import UndoManager, UndoState
 from p64.editor.viewport import create_viewport_class
@@ -79,6 +80,10 @@ def launch_editor(project_path: Path | None = None) -> None:
         QCheckBox, QColorDialog, QComboBox, QCompleter, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
         QMenu, QMessageBox, QFileDialog, QPixmap, QPushButton, QSizePolicy, Qt, QVBoxLayout, QWidget
     )
+    ConsolePanel = create_console_panel(
+        QApplication, QBrush, QCheckBox, QColor, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
+        QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, Qt
+    )
 
     class MainWindow(AssetBrowserMixin, HierarchyMixin, InspectorMixin, QMainWindow):
         def __init__(self, project: Project | None) -> None:
@@ -137,8 +142,7 @@ def launch_editor(project_path: Path | None = None) -> None:
             asset_browser.addWidget(self.assets)
             asset_browser.setSizes([260, 640])
 
-            self.console = QPlainTextEdit()
-            self.console.setReadOnly(True)
+            self.console = ConsolePanel(self)
 
             self.viewport = Viewport(
                 lambda: self.project,
@@ -514,7 +518,7 @@ def launch_editor(project_path: Path | None = None) -> None:
             self.viewport.reload_assets()
 
         def _log(self, text: str) -> None:
-            self.console.appendPlainText(text)
+            self.console.add_log(text)
 
     app = QApplication.instance() or QApplication([])
     project = Project.load(project_path) if project_path else None

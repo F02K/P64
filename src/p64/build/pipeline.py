@@ -9,7 +9,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from p64.engine.components import MeshRenderer, ScriptComponent
+from p64.engine.components import MeshRenderer, ModelRenderer
 from p64.engine.audio import ensure_audio_clips_for_assets
 from p64.engine.assets import AssetMetadata, discover_metadata
 from p64.engine.files import PROJECT_FILE, alternate_scene_path, is_scene_file
@@ -71,7 +71,7 @@ def validate_project(project_root: Path) -> BuildReport:
                         if metadata:
                             texture = _diffuse_texture_path(project, metadata, component.material)
                             if texture and not texture.exists():
-                                report.errors.append(f"{entity.name} references missing texture: {texture}")
+                                report.warnings.append(f"{entity.name} references missing texture: {texture}")
                         for material in component.material_slots:
                             material_path = resolve_material_reference(project.root, material)
                             if material_path and material_path.is_absolute():
@@ -81,7 +81,18 @@ def validate_project(project_root: Path) -> BuildReport:
                                     report.warnings.append(f"{entity.name} references external material: {material_path}")
                             texture = _material_texture_path(project, material)
                             if texture and not texture.exists():
-                                report.errors.append(f"{entity.name} references missing material texture: {texture}")
+                                report.warnings.append(f"{entity.name} references missing material texture: {texture}")
+                    if isinstance(component, ModelRenderer):
+                        for material in component.material_slots:
+                            material_path = resolve_material_reference(project.root, material)
+                            if material_path and material_path.is_absolute():
+                                try:
+                                    material_path.resolve().relative_to(project.assets_dir.resolve())
+                                except ValueError:
+                                    report.warnings.append(f"{entity.name} references external material: {material_path}")
+                            texture = _material_texture_path(project, material)
+                            if texture and not texture.exists():
+                                report.warnings.append(f"{entity.name} references missing material texture: {texture}")
     output_folder = Path(str(project.build_settings.get("output_folder", "build/game")))
     if output_folder.is_absolute():
         report.errors.append("Build output folder must be relative to the project.")
@@ -151,7 +162,7 @@ def _diffuse_texture_path(project: Project, metadata: AssetMetadata, material: s
     texture_name = material_defs.get(material, {}).get("diffuse_texture")
     if not texture_name:
         return None
-    return (project.root / metadata.source).parent / str(texture_name)
+    return _resolve_texture_path(project, str(texture_name), (project.root / metadata.source).parent, None)
 
 
 def _material_texture_path(project: Project, material: str | None) -> Path | None:
@@ -169,17 +180,24 @@ def _material_texture_path(project: Project, material: str | None) -> Path | Non
     texture_name = asset.textures.get("u_texture")
     if not texture_name:
         return None
+    metadata = load_material_metadata(material_path)
+    source = metadata.settings.get("source", {}) if metadata else {}
+    source_dir = (project.root / str(source["obj"])).parent if isinstance(source, dict) and source.get("obj") else None
+    return _resolve_texture_path(project, str(texture_name), material_path.parent, source_dir)
+
+
+def _resolve_texture_path(project: Project, texture_name: str, primary_dir: Path | None, source_dir: Path | None) -> Path | None:
     texture_path = Path(str(texture_name))
     if texture_path.is_absolute():
         return texture_path
     candidates: list[Path] = []
     if str(texture_name).startswith(("assets/", "packages/")):
         candidates.append(project.root / texture_name)
-    candidates.append(material_path.parent / texture_name)
-    metadata = load_material_metadata(material_path)
-    source = metadata.settings.get("source", {}) if metadata else {}
-    if isinstance(source, dict) and source.get("obj"):
-        candidates.append((project.root / str(source["obj"])).parent / texture_name)
+    if primary_dir is not None:
+        candidates.append(primary_dir / texture_name)
+    if source_dir is not None:
+        candidates.append(source_dir / texture_name)
+    candidates.append(project.assets_dir / texture_name)
     return next((candidate for candidate in candidates if candidate.exists()), candidates[0] if candidates else None)
 
 

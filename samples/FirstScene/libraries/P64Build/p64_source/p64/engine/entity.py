@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 from uuid import uuid4
 
-from p64.engine.components import Component, Transform, component_from_dict
+from p64.engine.components import Component, RectTransform, Transform, component_from_dict
 
 SCENE_OBJECT = "scene_object"
 GAME_OBJECT = "game_object"
@@ -20,6 +20,7 @@ class Entity:
     active: bool = True
     persistent: bool = False
     transform: Transform = field(default_factory=Transform)
+    rect_transform: RectTransform | None = None
     components: list[Component] = field(default_factory=list)
     children: list["Entity"] = field(default_factory=list)
     parent: "Entity | None" = field(default=None, repr=False, compare=False)
@@ -65,6 +66,7 @@ class Entity:
             "active": self.active,
             "persistent": self.persistent,
             "transform": self.transform.to_dict(),
+            **({"rect_transform": self.rect_transform.to_dict()} if self.rect_transform is not None else {}),
             "components": [component.to_dict() for component in self.components],
             "children": [child.to_dict() for child in self.children],
         }
@@ -78,6 +80,7 @@ class Entity:
             active=bool(data.get("active", True)),
             persistent=bool(data.get("persistent", False)),
             transform=Transform.from_dict(data.get("transform")),
+            rect_transform=RectTransform.from_dict(data.get("rect_transform")) if data.get("rect_transform") is not None else None,
             components=[component_from_dict(item) for item in data.get("components", [])],
         )
         for child_data in data.get("children", []):
@@ -94,6 +97,26 @@ def set_object_type_recursive(entity: Entity, object_type: str) -> None:
     entity.object_type = _object_type(object_type)
     for child in entity.children:
         set_object_type_recursive(child, entity.object_type)
+
+
+def entity_effectively_active(entity: Entity) -> bool:
+    current: Entity | None = entity
+    while current is not None:
+        if not current.active:
+            return False
+        current = current.parent
+    return True
+
+
+def entity_under_canvas(entity: Entity) -> bool:
+    current: Entity | None = entity.parent
+    while current is not None:
+        if any(component.type_name == "Canvas" for component in current.components):
+            return True
+        if current.rect_transform is not None:
+            return True
+        current = current.parent
+    return False
 
 
 SceneObject = Entity

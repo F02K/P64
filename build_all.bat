@@ -2,5 +2,6 @@
 setlocal
 
 set "ROOT=%~dp0"
-python "%ROOT%tools\build_tool\build_tool.py" %*
+echo build_all.bat is deprecated. Use build.bat all instead.
+python "%ROOT%tools\build_tool\build_tool.py" all %*
 exit /b %ERRORLEVEL%

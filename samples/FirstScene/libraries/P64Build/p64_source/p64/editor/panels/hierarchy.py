@@ -4,15 +4,42 @@ from collections.abc import Callable
 from typing import Any
 
 from p64.editor.ops import delete_entity, duplicate_entity, find_parent
-from p64.engine.assets import AssetMetadata
-from p64.engine.components import MeshRenderer
-from p64.engine.entity import Entity
+from p64.engine.assets import AssetMetadata, model_meshes
+from p64.engine.components import Canvas, MeshRenderer, RectTransform
+from p64.engine.entity import Entity, entity_effectively_active, entity_under_canvas
 from p64.engine.math import Vec3
+from p64.engine.transforms import world_position
 from p64.engine.validation import asset_metadata_by_id, entity_reference_errors, has_reference_errors
 
 
 def virtual_submesh_labels(entity: Entity, metadata_for_mesh: Callable[[str], AssetMetadata | None]) -> list[str]:
-    return []
+    labels: list[str] = []
+    for component in entity.components:
+        if not isinstance(component, MeshRenderer) or not component.mesh:
+            continue
+        metadata = metadata_for_mesh(component.mesh)
+        if metadata is None:
+            continue
+        meshes = model_meshes(metadata)
+        if meshes:
+            for index, mesh in enumerate(meshes):
+                mesh_id = str(mesh.get("id") or "")
+                if component.mesh not in {metadata.id, mesh_id}:
+                    continue
+                if component.submesh and component.submesh not in {
+                    str(mesh.get("name") or ""),
+                    str(mesh.get("source_group") or ""),
+                    str(mesh.get("node_path") or ""),
+                    str(mesh.get("legacy_submesh") or ""),
+                }:
+                    continue
+                name = str(mesh.get("name") or mesh.get("source_group") or mesh.get("node_path") or f"Mesh {index + 1}")
+                labels.append(f"Mesh: {name}")
+        elif component.submesh:
+            labels.append(f"Mesh: {component.submesh}")
+        else:
+            labels.append(f"Mesh: {metadata.source or metadata.id}")
+    return labels
 
 
 def create_hierarchy_mixin(
@@ -20,27 +47,77 @@ def create_hierarchy_mixin(
 ) -> type:
     class HierarchyMixin:
         def _populate_hierarchy(self) -> None:
+            selected_id = self.selected.id if self.selected else None
+            had_items = self.hierarchy.topLevelItemCount() > 0
+            expanded_ids = self._expanded_hierarchy_ids()
+            self.hierarchy.blockSignals(True)
             self.hierarchy.clear()
-            if not self.scene:
-                return
-            metadata = asset_metadata_by_id(self.project) if self.project else {}
-            for entity in self.scene.entities:
-                self.hierarchy.addTopLevelItem(self._entity_item(entity, metadata))
-            self.hierarchy.expandAll()
+            try:
+                if not self.scene:
+                    return
+                metadata = asset_metadata_by_id(self.project) if self.project else {}
+                for entity in self.scene.entities:
+                    self.hierarchy.addTopLevelItem(self._entity_item(entity, metadata))
+                if had_items:
+                    self._restore_hierarchy_expanded_ids(expanded_ids)
+                else:
+                    self.hierarchy.expandAll()
+                if selected_id and self.scene.find(selected_id):
+                    self._select_hierarchy_item(selected_id)
+            finally:
+                self.hierarchy.blockSignals(False)
 
         def _entity_item(self, entity: Entity, metadata: dict[str, AssetMetadata] | None = None) -> Any:
-            item = QTreeWidgetItem([f"{entity.name}  [{entity.object_type_label}]"])
+            tags = [entity.object_type_label]
+            if not entity.active:
+                tags.append("Inactive")
+            elif not entity_effectively_active(entity):
+                tags.append("Inherited Inactive")
+            if entity.persistent:
+                tags.append("Persistent")
+            item = QTreeWidgetItem([f"{entity.name}  ({', '.join(tags)})"])
             item.setData(0, Qt.UserRole, entity.id)
             if self.project and has_reference_errors(self.project, entity, metadata):
                 color = QColor(210, 70, 70) if entity_reference_errors(self.project, entity, metadata) else QColor(170, 110, 110)
                 item.setForeground(0, QBrush(color))
+            elif not entity.active:
+                item.setForeground(0, QBrush(QColor(135, 135, 135)))
+            elif not entity_effectively_active(entity):
+                item.setForeground(0, QBrush(QColor(115, 115, 115)))
+            elif entity.persistent:
+                item.setForeground(0, QBrush(QColor(80, 120, 170)))
             for child in entity.children:
                 item.addChild(self._entity_item(child, metadata))
             for label in self._virtual_submesh_labels(entity):
                 virtual = QTreeWidgetItem([label])
                 virtual.setFlags(virtual.flags() & ~Qt.ItemIsSelectable)
+                virtual.setForeground(0, QBrush(QColor(115, 115, 115)))
                 item.addChild(virtual)
             return item
+
+        def _expanded_hierarchy_ids(self) -> set[str]:
+            expanded: set[str] = set()
+
+            def visit(item: Any) -> None:
+                entity_id = item.data(0, Qt.UserRole)
+                if entity_id and item.isExpanded():
+                    expanded.add(str(entity_id))
+                for index in range(item.childCount()):
+                    visit(item.child(index))
+
+            for index in range(self.hierarchy.topLevelItemCount()):
+                visit(self.hierarchy.topLevelItem(index))
+            return expanded
+
+        def _restore_hierarchy_expanded_ids(self, expanded_ids: set[str]) -> None:
+            def visit(item: Any) -> None:
+                entity_id = item.data(0, Qt.UserRole)
+                item.setExpanded(bool(entity_id and str(entity_id) in expanded_ids))
+                for index in range(item.childCount()):
+                    visit(item.child(index))
+
+            for index in range(self.hierarchy.topLevelItemCount()):
+                visit(self.hierarchy.topLevelItem(index))
 
         def _select_from_tree(self) -> None:
             if not self.scene:
@@ -101,6 +178,8 @@ def create_hierarchy_mixin(
                 self._create_entity()
                 return
             child = Entity("Entity")
+            if _entity_has_canvas(self.selected) or entity_under_canvas(self.selected):
+                child.rect_transform = RectTransform()
             self.selected.add_child(child)
             self.selected = child
             self._mark_dirty()
@@ -140,7 +219,7 @@ def create_hierarchy_mixin(
         def _frame_selected(self) -> None:
             if not self.selected:
                 return
-            position = self.selected.transform.position
+            position = world_position(self.selected)
             self.viewport.scene_camera.position = Vec3(position.x, position.y + 2.0, position.z + 8.0)
             self.viewport.scene_camera.rotation = Vec3(-15.0, 0.0, 0.0)
             self.viewport.set_view_mode("Scene")
@@ -148,14 +227,30 @@ def create_hierarchy_mixin(
             self._update_viewport_status()
 
         def _show_hierarchy_menu(self, pos: Any) -> None:
+            item = self.hierarchy.itemAt(pos)
+            if item is not None:
+                entity_id = item.data(0, Qt.UserRole)
+                if self.scene and entity_id and self.scene.find(entity_id):
+                    self.hierarchy.setCurrentItem(item)
+                else:
+                    self.hierarchy.clearSelection()
+                    self.selected = None
+                    self._populate_inspector()
+                    self._update_viewport_status()
+            has_entity = bool(self.scene and self.selected and self.scene.find(self.selected.id))
             menu = QMenu(self)
             menu.addAction("Create Empty", self._create_entity)
-            menu.addAction("Add Child", self._add_child_entity)
+            add_child = menu.addAction("Add Child", self._add_child_entity)
+            add_child.setEnabled(has_entity)
             menu.addSeparator()
-            menu.addAction("Duplicate", self._duplicate_selected)
-            menu.addAction("Delete", self._delete_selected)
-            menu.addAction("Rename", self._rename_selected_dialog)
-            menu.addAction("Frame Selected", self._frame_selected)
+            duplicate = menu.addAction("Duplicate", self._duplicate_selected)
+            duplicate.setEnabled(has_entity)
+            delete = menu.addAction("Delete", self._delete_selected)
+            delete.setEnabled(has_entity)
+            rename = menu.addAction("Rename", self._rename_selected_dialog)
+            rename.setEnabled(has_entity)
+            frame = menu.addAction("Frame Selected", self._frame_selected)
+            frame.setEnabled(has_entity)
             menu.addSeparator()
             for component_name in [
                 "MeshRenderer",
@@ -168,10 +263,15 @@ def create_hierarchy_mixin(
                 "EntityPhysics",
                 "ScriptComponent",
             ]:
-                menu.addAction(f"Add {component_name}", lambda checked=False, name=component_name: self._add_component_by_name(name))
+                action = menu.addAction(f"Add {component_name}", lambda checked=False, name=component_name: self._add_component_by_name(name))
+                action.setEnabled(has_entity)
             menu.exec(self.hierarchy.viewport().mapToGlobal(pos))
 
         def _virtual_submesh_labels(self, entity: Entity) -> list[str]:
             return virtual_submesh_labels(entity, self._metadata_for_mesh)
 
     return HierarchyMixin
+
+
+def _entity_has_canvas(entity: Entity) -> bool:
+    return any(isinstance(component, Canvas) for component in entity.components)

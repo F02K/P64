@@ -215,6 +215,26 @@ Move or zip the whole `build/app/P64/` folder.
 The Hub can be associated with `.p64` files on Windows. In the Hub, use the
 `File Association` button to copy the command for the current executable.
 
+## Root App Build
+
+Use the Windows build helper to open the Build Center for P64 tooling:
+
+```powershell
+.\build.bat
+```
+
+Useful targets:
+
+```powershell
+.\build.bat app
+.\build.bat all --skip-tests
+.\build.bat hub --skip-pyinstaller
+```
+
+`build.bat` builds the portable P64 App/Hub. Game builds are handled from the
+editor/project build settings. Test targets use verbose output so the Build
+Center log shows individual test names, elapsed time, and step progress.
+
 ## Game Builds
 
 Create a fast runtime bundle:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -10,11 +11,15 @@ from p64.engine.runtime_session import RuntimeSession
 from p64.engine.scene import Scene
 from p64.engine.vscode import setup_vscode_project
 from p64.editor.dialogs.build_settings import open_build_settings_dialog
+from p64.editor.dialogs.lighting_settings import open_lighting_settings_dialog
 from p64.editor.dialogs.project_settings import open_project_settings_dialog
 from p64.editor.inspectors.components import create_inspector_mixin
 from p64.editor.ops import DirtyTracker, update_material_usage_cache
+from p64.editor.panels.analysis import create_analysis_panel
 from p64.editor.panels.assets import create_asset_browser_mixin
+from p64.editor.panels.console import create_console_panel
 from p64.editor.panels.hierarchy import create_hierarchy_mixin
+from p64.editor.profiler import ProfilerRecorder
 from p64.editor.undo import UndoManager, UndoState
 from p64.editor.viewport import create_viewport_class
 
@@ -51,6 +56,8 @@ def launch_editor(project_path: Path | None = None) -> None:
             QStyle,
             QTabBar,
             QTabWidget,
+            QTableWidget,
+            QTableWidgetItem,
             QTreeWidget,
             QTreeWidgetItem,
             QVBoxLayout,
@@ -67,7 +74,7 @@ def launch_editor(project_path: Path | None = None) -> None:
     surface_format.setVersion(3, 3)
     surface_format.setProfile(QSurfaceFormat.CoreProfile)
     surface_format.setDepthBufferSize(24)
-    surface_format.setSwapInterval(1)
+    surface_format.setSwapInterval(0)
     QSurfaceFormat.setDefaultFormat(surface_format)
 
     Viewport = create_viewport_class(QOpenGLWidget, QWidget, QLabel, QVBoxLayout, Qt)
@@ -79,6 +86,11 @@ def launch_editor(project_path: Path | None = None) -> None:
         QCheckBox, QColorDialog, QComboBox, QCompleter, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
         QMenu, QMessageBox, QFileDialog, QPixmap, QPushButton, QSizePolicy, Qt, QVBoxLayout, QWidget
     )
+    ConsolePanel = create_console_panel(
+        QApplication, QBrush, QCheckBox, QColor, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
+        QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, Qt
+    )
+    AnalysisPanel = create_analysis_panel(QLabel, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QTimer, Qt)
 
     class MainWindow(AssetBrowserMixin, HierarchyMixin, InspectorMixin, QMainWindow):
         def __init__(self, project: Project | None) -> None:
@@ -100,6 +112,8 @@ def launch_editor(project_path: Path | None = None) -> None:
             self.play_session: RuntimeSession | None = None
             self.asset_watcher = QFileSystemWatcher(self)
             self._updating_asset_grid = False
+            self.profiler_recorder = ProfilerRecorder()
+            self.analysis_window: QWidget | None = None
 
             self.hierarchy = QTreeWidget()
             self.hierarchy.setHeaderLabel("Hierarchy")
@@ -137,8 +151,7 @@ def launch_editor(project_path: Path | None = None) -> None:
             asset_browser.addWidget(self.assets)
             asset_browser.setSizes([260, 640])
 
-            self.console = QPlainTextEdit()
-            self.console.setReadOnly(True)
+            self.console = ConsolePanel(self)
 
             self.viewport = Viewport(
                 lambda: self.project,
@@ -150,10 +163,12 @@ def launch_editor(project_path: Path | None = None) -> None:
                 self._scene_changed_live,
                 self._begin_scene_edit,
                 self._commit_scene_edit,
+                lambda: self.profiler_recorder if self.profiler_recorder.enabled else None,
             )
             self.frame_clock = QElapsedTimer()
             self.frame_clock.start()
             self.repaint_timer = QTimer(self)
+            self.repaint_timer.setTimerType(Qt.PreciseTimer)
             self.repaint_timer.timeout.connect(self._tick_viewport)
             self.repaint_timer.start(16)
 
@@ -222,6 +237,9 @@ def launch_editor(project_path: Path | None = None) -> None:
             toolbar.addWidget(scale_button)
             toolbar.addSeparator()
             toolbar.addWidget(self.play_button)
+            window_menu = self.menuBar().addMenu("Window")
+            window_menu.addAction("Lighting Settings", self._open_lighting_settings)
+            window_menu.addAction("Analysis", self._open_analysis)
 
             self.asset_watcher.directoryChanged.connect(lambda _path: self._refresh_assets_from_watcher())
             self.asset_watcher.fileChanged.connect(lambda _path: self._refresh_assets_from_watcher())
@@ -234,10 +252,22 @@ def launch_editor(project_path: Path | None = None) -> None:
         def _tick_viewport(self) -> None:
             elapsed_ms = self.frame_clock.restart()
             dt = max(0.001, elapsed_ms / 1000.0)
-            if self.play_session:
-                for error in self.play_session.tick(dt):
-                    self._log(f"Playmode script error: {error}")
-            self.viewport.tick(dt)
+            profiler = self.profiler_recorder if self.profiler_recorder.enabled else None
+            frame = None
+            if profiler is not None:
+                frame = profiler.begin_frame("Editor")
+            try:
+                with _profiler_section(profiler, "editor tick"):
+                    if self.play_session:
+                        with _profiler_section(profiler, "playmode tick"):
+                            self.play_session.profiler_recorder = profiler
+                            for error in self.play_session.tick(dt):
+                                self._log(f"Playmode script error: {error}")
+                    with _profiler_section(profiler, "viewport tick"):
+                        self.viewport.tick(dt)
+            finally:
+                if profiler is not None:
+                    profiler.end_frame(frame)
 
         def _viewport_scene(self) -> Scene | None:
             return self.play_session.scene if self.play_session else self.scene
@@ -335,6 +365,7 @@ def launch_editor(project_path: Path | None = None) -> None:
             self._save_scene()
             runtime_scene = Scene.from_dict(self.scene.to_dict())
             self.play_session = RuntimeSession(self.project, runtime_scene)
+            self.play_session.profiler_recorder = self.profiler_recorder if self.profiler_recorder.enabled else None
             self.play_button.setText("Stop")
             self.hierarchy.setEnabled(False)
             self.inspector.setEnabled(False)
@@ -381,6 +412,25 @@ def launch_editor(project_path: Path | None = None) -> None:
                 self._log("Build settings saved.")
 
             open_build_settings_dialog(self, self.project, on_saved, self._build_bundle, self._build_project)
+
+        def _open_lighting_settings(self) -> None:
+            if not self.scene:
+                return
+
+            def on_changed() -> None:
+                self._mark_dirty("Edit Lighting Settings")
+                self.viewport.reload_assets()
+                self.viewport.update()
+
+            open_lighting_settings_dialog(self, self.scene, on_changed)
+
+        def _open_analysis(self) -> None:
+            if self.analysis_window is None:
+                self.analysis_window = AnalysisPanel(self.profiler_recorder, self)
+                self.analysis_window.destroyed.connect(lambda *_args: setattr(self, "analysis_window", None))
+            self.analysis_window.show()
+            self.analysis_window.raise_()
+            self.analysis_window.activateWindow()
 
         def _setup_vscode(self) -> None:
             if not self.project:
@@ -514,10 +564,19 @@ def launch_editor(project_path: Path | None = None) -> None:
             self.viewport.reload_assets()
 
         def _log(self, text: str) -> None:
-            self.console.appendPlainText(text)
+            self.console.add_log(text)
 
     app = QApplication.instance() or QApplication([])
     project = Project.load(project_path) if project_path else None
     window = MainWindow(project)
     window.show()
     app.exec()
+
+
+def _profiler_section(profiler: Any | None, name: str) -> Any:
+    if profiler is None:
+        return nullcontext()
+    try:
+        return profiler.section(name)
+    except Exception:
+        return nullcontext()

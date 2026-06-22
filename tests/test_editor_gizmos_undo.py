@@ -5,6 +5,7 @@ from p64.editor.undo import UndoManager
 from p64.engine.entity import Entity
 from p64.engine.math import Vec3
 from p64.engine.scene import Scene
+from p64.engine.transforms import world_position, world_rotation
 
 
 class EditorUndoTests(unittest.TestCase):
@@ -136,6 +137,18 @@ class EditorGizmoTests(unittest.TestCase):
 
         self.assertEqual(entity.transform.position.to_list(), [1.0, 0.5, 0.0])
 
+    def test_child_move_drag_writes_local_position_for_world_motion(self):
+        parent = Entity("Parent")
+        parent.transform.position = Vec3(5.0, 0.0, 0.0)
+        child = parent.add_child(Entity("Child"))
+        child.transform.position = Vec3(1.0, 0.0, 0.0)
+        start = transform_snapshot(child)
+
+        apply_gizmo_drag(child, "move", "x", start, 20, 0, axis_screen_direction=(1, 0), world_per_pixel=0.1)
+
+        self.assertEqual(world_position(child), Vec3(8.0, 0.0, 0.0))
+        self.assertEqual(child.transform.position, Vec3(3.0, 0.0, 0.0))
+
     def test_scale_axis_clamps_and_center_scales_uniformly(self):
         entity = Entity("Thing")
         start = transform_snapshot(entity)
@@ -168,6 +181,18 @@ class EditorGizmoTests(unittest.TestCase):
         apply_gizmo_drag(entity, "rotate", "center", start, 20, 0, camera_forward=Vec3(0.1, 0.8, 0.2))
 
         self.assertEqual(entity.transform.rotation.to_list(), [0.0, 10.0, 0.0])
+
+    def test_child_rotate_drag_writes_local_rotation_for_world_rotation(self):
+        parent = Entity("Parent")
+        parent.transform.rotation = Vec3(0.0, 30.0, 0.0)
+        child = parent.add_child(Entity("Child"))
+        child.transform.rotation = Vec3(0.0, 10.0, 0.0)
+        start = transform_snapshot(child)
+
+        apply_gizmo_drag(child, "rotate", "y", start, 20, 0, axis_screen_direction=(1, 0))
+
+        self.assertEqual(world_rotation(child), Vec3(0.0, 50.0, 0.0))
+        self.assertEqual(child.transform.rotation, Vec3(0.0, 20.0, 0.0))
 
 
 if __name__ == "__main__":

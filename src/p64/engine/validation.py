@@ -3,9 +3,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from p64.engine.assets import AssetMetadata, discover_metadata, resolve_model_mesh
+from p64.engine.assets import AssetMetadata, discover_metadata, model_info, resolve_model_mesh
 from p64.engine.audio import audio_info, resolve_audio_clip
-from p64.engine.components import AudioSource, CharacterController, Collider, EntityPhysics, MeshRenderer, ScriptComponent
+from p64.engine.components import AudioSource, CharacterController, Collider, EntityPhysics, MeshRenderer, ModelRenderer, ParticleEmitter, ScriptComponent
 from p64.engine.entity import Entity
 from p64.engine.material import resolve_material_reference
 from p64.engine.project import Project
@@ -57,7 +57,20 @@ def entity_reference_errors(project: Project, entity: Entity, metadata: dict[str
                 material_path = resolve_material_reference(project.root, material)
                 if material_path and not material_path.exists():
                     errors.append(f"Missing material asset: {material}")
+        if isinstance(component, ModelRenderer):
+            if component.model:
+                model = metadata.get(component.model)
+                if model is None or model_info(model) is None:
+                    errors.append(f"Missing model asset: {component.model}")
+            if component.shader and not (project.root / component.shader).exists():
+                errors.append(f"Missing shader: {component.shader}")
+            for material in component.material_slots:
+                material_path = resolve_material_reference(project.root, material)
+                if material_path and not material_path.exists():
+                    errors.append(f"Missing material asset: {material}")
         if isinstance(component, ScriptComponent):
+            if not entity.is_entity:
+                errors.append("ScriptComponent requires an Entity")
             for entry in component.scripts:
                 if not entry.enabled:
                     continue
@@ -101,12 +114,21 @@ def entity_reference_errors(project: Project, entity: Entity, metadata: dict[str
             if component.shape == "mesh" and not component.convex and not entity.is_game_object:
                 errors.append("Non-convex MeshCollider requires a GameObject")
             if component.shape == "mesh" or component.fit_to_mesh:
-                renderer = _mesh_renderer(entity)
-                if renderer is None or not renderer.mesh:
-                    errors.append("Mesh collider needs a MeshRenderer")
-                elif resolve_model_mesh(metadata, renderer.mesh, renderer.submesh)[0] is None:
-                    errors.append(f"Missing mesh asset: {renderer.mesh}")
+                renderer = _render_geometry(entity)
+                if renderer is None:
+                    errors.append("Mesh collider needs a MeshRenderer or ModelRenderer")
+                elif isinstance(renderer, MeshRenderer):
+                    if not renderer.mesh:
+                        errors.append("Mesh collider needs a MeshRenderer or ModelRenderer")
+                    elif resolve_model_mesh(metadata, renderer.mesh, renderer.submesh)[0] is None:
+                        errors.append(f"Missing mesh asset: {renderer.mesh}")
+                elif isinstance(renderer, ModelRenderer):
+                    model = metadata.get(renderer.model)
+                    if not renderer.model or model is None or model_info(model) is None:
+                        errors.append(f"Missing model asset: {renderer.model}")
         if isinstance(component, CharacterController):
+            if not entity.is_entity:
+                errors.append("CharacterController requires an Entity")
             if component.height <= 0 or component.radius <= 0:
                 errors.append("CharacterController height and radius must be positive")
         if isinstance(component, EntityPhysics):
@@ -114,6 +136,8 @@ def entity_reference_errors(project: Project, entity: Entity, metadata: dict[str
                 errors.append("EntityPhysics mass must be positive")
             if not entity.is_entity:
                 errors.append("EntityPhysics requires an Entity")
+        if isinstance(component, ParticleEmitter) and not entity.is_entity:
+            errors.append("ParticleEmitter requires an Entity")
     return errors
 
 
@@ -130,9 +154,12 @@ def _find_script(project: Project, script: str) -> Path | None:
     return None
 
 
-def _mesh_renderer(entity: Entity) -> MeshRenderer | None:
+def _render_geometry(entity: Entity) -> MeshRenderer | ModelRenderer | None:
     for component in entity.components:
         if isinstance(component, MeshRenderer):
+            return component
+    for component in entity.components:
+        if isinstance(component, ModelRenderer):
             return component
     return None
 

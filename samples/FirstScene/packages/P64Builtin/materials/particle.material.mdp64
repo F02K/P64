@@ -1,0 +1,10 @@
+{
+  "id": "material_particle",
+  "kind": "material",
+  "source": "packages/P64Builtin/materials/particle.material",
+  "groups": [],
+  "materials": [],
+  "settings": {
+    "builtin": true
+  }
+}

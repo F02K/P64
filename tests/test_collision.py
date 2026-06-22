@@ -8,8 +8,8 @@ import p64.engine.collision as collision
 import p64.engine.mesh_geometry as mesh_geometry
 from p64.engine.assets import AssetMetadata
 from p64.engine.collision import CollisionWorld, apply_mesh_primitive_defaults, collider_bounds, collider_sphere
-from p64.engine.components import CharacterController, Collider, EntityPhysics, MeshRenderer, ScriptComponent, ScriptEntry, component_from_dict
-from p64.engine.entity import GAME_OBJECT, Entity
+from p64.engine.components import CharacterController, Collider, EntityPhysics, MeshRenderer, ModelRenderer, ScriptComponent, ScriptEntry, component_from_dict
+from p64.engine.entity import ENTITY, GAME_OBJECT, Entity
 from p64.engine.files import find_metadata_for_source
 from p64.engine.mesh_geometry import clear_mesh_geometry_cache, convex_hull, mesh_triangles
 from p64.engine.obj import import_obj_to_project
@@ -150,6 +150,25 @@ class CollisionTests(unittest.TestCase):
             self.assertEqual(collider.shape, "box")
             self.assertEqual(collider.size.to_list(), [2.0, 2.0, 0.001])
 
+    def test_model_renderer_fit_to_mesh_uses_whole_model_bounds(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_two_group_model(project)
+            entity = Entity("Moving Model", object_type=ENTITY)
+            entity.transform.position = Vec3(1, 2, 3)
+            entity.add_component(ModelRenderer(model=metadata.id))
+
+            box = Collider(shape="box", fit_to_mesh=True)
+            sphere = Collider(shape="sphere", fit_to_mesh=True)
+
+            bounds = collider_bounds(entity, box, project)
+            center, radius = collider_sphere(entity, sphere, project)
+
+            self.assertEqual(bounds.min.to_list(), [1.0, 2.0, 3.0])
+            self.assertEqual(bounds.max.to_list(), [5.0, 4.0, 3.0])
+            self.assertEqual(center.to_list(), [3.0, 3.0, 3.0])
+            self.assertEqual(radius, 2.0)
+
     def test_mesh_collider_serializes_convex_and_validates_static_only_when_non_convex(self):
         collider = Collider(shape="mesh", fit_to_mesh=True, convex=True)
         loaded = component_from_dict(collider.to_dict())
@@ -173,6 +192,55 @@ class CollisionTests(unittest.TestCase):
             convex_errors = entity_reference_errors(project, convex_dynamic)
             self.assertIn("Non-convex MeshCollider requires a GameObject", errors)
             self.assertNotIn("Non-convex MeshCollider requires a GameObject", convex_errors)
+
+    def test_model_renderer_mesh_collider_validation_allows_entity_when_convex(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_two_group_model(project)
+            dynamic = Entity("Moving Model", object_type=ENTITY)
+            dynamic.add_component(ModelRenderer(model=metadata.id))
+            dynamic.add_component(Collider(shape="mesh"))
+            convex_dynamic = Entity("Convex Moving Model", object_type=ENTITY)
+            convex_dynamic.add_component(ModelRenderer(model=metadata.id))
+            convex_dynamic.add_component(Collider(shape="mesh", convex=True))
+
+            from p64.engine.validation import entity_reference_errors
+
+            errors = entity_reference_errors(project, dynamic)
+            convex_errors = entity_reference_errors(project, convex_dynamic)
+            self.assertNotIn("ModelRenderer requires a GameObject", convex_errors)
+            self.assertIn("Non-convex MeshCollider requires a GameObject", errors)
+            self.assertNotIn("Non-convex MeshCollider requires a GameObject", convex_errors)
+
+    def test_model_renderer_convex_mesh_collider_blocks_dynamic_actor(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_cube_mesh(project)
+            model = Entity("Moving Hull", object_type=ENTITY)
+            model.add_component(ModelRenderer(model=metadata.id))
+            model.add_component(Collider(shape="mesh", convex=True))
+            actor = Entity("Actor")
+            actor.transform.position = Vec3(0.2, 0.2, 0.2)
+            actor_collider = Collider(size=Vec3(0.2, 0.2, 0.2))
+            actor.add_component(actor_collider)
+
+            hits = CollisionWorld(Scene("Test", [actor, model]), project).overlaps(actor, actor_collider)
+
+            self.assertEqual([hit.entity.name for hit in hits], ["Moving Hull"])
+
+    def test_model_renderer_geometry_combines_all_model_meshes(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_two_group_model(project)
+            renderer = ModelRenderer(model=metadata.id)
+
+            bounds = mesh_geometry.mesh_bounds(project, renderer)
+            triangles = mesh_triangles(project, renderer)
+
+            self.assertIsNotNone(bounds)
+            self.assertEqual(bounds[0].to_list(), [0.0, 0.0, 0.0])
+            self.assertEqual(bounds[1].to_list(), [4.0, 2.0, 0.0])
+            self.assertEqual(len(triangles), 2)
 
     def test_convex_hull_uses_outer_points_and_ignores_inner_mesh_detail(self):
         with TemporaryDirectory() as tmp:
@@ -238,6 +306,17 @@ class CollisionTests(unittest.TestCase):
 
         world = CollisionWorld(scene)
 
+        self.assertEqual(world.static_colliders, [])
+
+    def test_collision_world_ignores_inherited_inactive_colliders(self):
+        parent = Entity("Parent", active=False, object_type=GAME_OBJECT)
+        child = parent.add_child(Entity("Child"))
+        child.add_component(Collider())
+        scene = Scene("Test", [parent])
+
+        world = CollisionWorld(scene)
+
+        self.assertTrue(child.active)
         self.assertEqual(world.static_colliders, [])
 
     def test_primitive_static_colliders_do_not_bake_mesh_collision_data(self):
@@ -403,6 +482,18 @@ class CollisionTests(unittest.TestCase):
             self.assertEqual(bounds.call_count, 0)
             self.assertEqual(actor.transform.position.to_list(), [0.0, 0.0, 0.0])
             self.assertEqual(physics._force.to_list(), [0.0, 0.0, 0.0])
+
+    def test_step_physics_uses_cached_physics_bodies_without_rescanning_scene(self):
+        actor = Entity("Actor")
+        actor.add_component(EntityPhysics(use_gravity=False, velocity=Vec3(2.0, 0.0, 0.0)))
+        scene = Scene("Test", [actor])
+        world = CollisionWorld(scene)
+        scene.walk_active = mock.Mock(side_effect=AssertionError("step_physics should use cached physics bodies"))
+
+        world.step_physics(1.0)
+
+        self.assertEqual(world.physics_body_count(), 1)
+        self.assertEqual(actor.transform.position.x, 2.0)
 
     def test_entity_physics_angular_velocity_and_torque_rotate_body(self):
         actor = Entity("Actor")
@@ -580,6 +671,20 @@ class CollisionTests(unittest.TestCase):
         self.assertEqual(bounds.min.to_list(), [5.0, -1.0, -1.0])
         self.assertEqual(bounds.max.to_list(), [7.0, 1.0, 1.0])
 
+    def test_child_character_controller_bounds_include_parent_transform(self):
+        from p64.engine.collision import controller_bounds
+
+        parent = Entity("Parent")
+        parent.transform.position = Vec3(5.0, 0.0, 0.0)
+        child = parent.add_child(Entity("Child"))
+        child.transform.position = Vec3(1.0, 0.0, 0.0)
+        controller = CharacterController(radius=0.5, height=2.0)
+
+        bounds = controller_bounds(child, controller)
+
+        self.assertAlmostEqual(bounds.min.x, 5.55)
+        self.assertAlmostEqual(bounds.max.x, 6.45)
+
     def test_entity_physics_stops_against_static_mesh_collider(self):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
@@ -661,6 +766,24 @@ def _import_test_mesh(project: Project):
         "v 2 0 0\n"
         "v 0 2 0\n"
         "f 1 2 3\n",
+        encoding="utf-8",
+    )
+    return import_obj_to_project(project, obj)
+
+
+def _import_two_group_model(project: Project):
+    obj = project.root / "two_group_model.obj"
+    obj.write_text(
+        "o Body\n"
+        "v 0 0 0\n"
+        "v 2 0 0\n"
+        "v 0 2 0\n"
+        "f 1 2 3\n"
+        "o Wing\n"
+        "v 2 0 0\n"
+        "v 4 0 0\n"
+        "v 4 2 0\n"
+        "f 4 5 6\n",
         encoding="utf-8",
     )
     return import_obj_to_project(project, obj)

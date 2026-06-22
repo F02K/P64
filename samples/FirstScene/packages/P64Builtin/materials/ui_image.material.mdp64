@@ -1,0 +1,10 @@
+{
+  "id": "material_ui_image",
+  "kind": "material",
+  "source": "packages/P64Builtin/materials/ui_image.material",
+  "groups": [],
+  "materials": [],
+  "settings": {
+    "builtin": true
+  }
+}

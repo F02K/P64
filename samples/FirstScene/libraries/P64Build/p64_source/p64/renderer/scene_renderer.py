@@ -3,12 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import cos, pi, radians, sin, tan
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from p64.engine.assets import AssetMetadata, discover_metadata, resolve_model_mesh
+from p64.engine.builtin import CLOUD_SHADER_RELATIVE, ERROR_SHADER_RELATIVE, PARTICLE_SHADER_RELATIVE, SKYBOX_SHADER_RELATIVE, SPRITE_SHADER_RELATIVE, UI_IMAGE_SHADER_RELATIVE, UI_TEXT_SHADER_RELATIVE
 from p64.engine.collision import collider_bounds, collider_sphere, controller_bounds
-from p64.engine.components import AudioSource, Camera, CharacterController, Collider, Light, MeshRenderer, SpawnPoint
-from p64.engine.entity import Entity
+from p64.engine.components import AudioSource, Camera, Canvas, CharacterController, Collider, Light, MeshRenderer, ParticleEmitter, RectTransform, SpawnPoint, SpriteRenderer, UIImage, UIText
+from p64.engine.entity import Entity, entity_effectively_active
 from p64.engine.material import MaterialAsset, load_material_metadata, resolve_material_reference
 from p64.engine.math import Vec3
 from p64.engine.mesh_geometry import clear_mesh_geometry_cache, convex_hull, mesh_triangles, transform_triangle
@@ -17,7 +18,8 @@ from p64.engine.project import Project
 from p64.engine.render_settings import clamp_render_settings, default_render_settings
 from p64.engine.scene import Scene
 from p64.engine.shader import default_shader_id, normalize_shader_id, parse_shader
-from p64.renderer.shaders import CLOUD_PLANE_FRAGMENT_SHADER, CLOUD_PLANE_VERTEX_SHADER, ERROR_FRAGMENT_SHADER, ERROR_VERTEX_SHADER, SKYBOX_FRAGMENT_SHADER, SKYBOX_VERTEX_SHADER, STANDARD_VERTEX_LIT_FRAGMENT_SHADER, STANDARD_VERTEX_LIT_VERTEX_SHADER
+from p64.engine.transforms import world_forward, world_position, world_right, world_rotation, world_scale, world_up
+from p64.renderer.shaders import CLOUD_PLANE_FRAGMENT_SHADER, CLOUD_PLANE_VERTEX_SHADER, ERROR_FRAGMENT_SHADER, ERROR_VERTEX_SHADER, PARTICLE_FRAGMENT_SHADER, PARTICLE_VERTEX_SHADER, SKYBOX_FRAGMENT_SHADER, SKYBOX_VERTEX_SHADER, SPRITE_FRAGMENT_SHADER, SPRITE_VERTEX_SHADER, STANDARD_VERTEX_LIT_FRAGMENT_SHADER, STANDARD_VERTEX_LIT_VERTEX_SHADER, UI_FRAGMENT_SHADER, UI_VERTEX_SHADER
 
 
 MAX_SHADER_LIGHTS = 8
@@ -25,6 +27,8 @@ MESH_VERTEX_FLOATS = 11
 MESH_VERTEX_LAYOUT = "3f 2f 3f 3f"
 MESH_POSITION_ONLY_LAYOUT = "3f 32x"
 MESH_OUTLINE_LAYOUT = "3f 8x 3f 12x"
+SPRITE_VERTEX_FLOATS = 8
+SPRITE_VERTEX_LAYOUT = "3f 2f 3f"
 
 
 def _render_exception_text(exc: Exception) -> str:
@@ -65,12 +69,30 @@ class RenderLineMesh:
 
 
 @dataclass
+class TextTexture:
+    texture: Any
+    size: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class UILayoutDebugEntry:
+    entity_id: str
+    entity_name: str
+    rect: tuple[float, float, float, float]
+    image_rects: tuple[tuple[float, float, float, float], ...] = ()
+    text_rects: tuple[tuple[float, float, float, float], ...] = ()
+
+
+@dataclass
 class RenderCamera:
     position: Vec3
     rotation: Vec3
     fov: float = 60.0
     near: float = 0.1
     far: float = 500.0
+    forward: Vec3 | None = None
+    right: Vec3 | None = None
+    up: Vec3 | None = None
 
 
 class SceneRenderer:
@@ -82,7 +104,7 @@ class SceneRenderer:
         self.project = project
         self.log = log or (lambda message: None)
         self.program = self._compile_default_program()
-        self.error_program = ctx.program(vertex_shader=ERROR_VERTEX_SHADER, fragment_shader=ERROR_FRAGMENT_SHADER)
+        self.error_program = self._compile_builtin_program(ERROR_SHADER_RELATIVE, ERROR_VERTEX_SHADER, ERROR_FRAGMENT_SHADER, "error")
         self.selection_outline_program = ctx.program(
             vertex_shader="""
                 #version 330
@@ -127,13 +149,40 @@ class SceneRenderer:
                 }
             """,
         )
-        self.skybox_program = ctx.program(vertex_shader=SKYBOX_VERTEX_SHADER, fragment_shader=SKYBOX_FRAGMENT_SHADER)
-        self.cloud_plane_program = ctx.program(vertex_shader=CLOUD_PLANE_VERTEX_SHADER, fragment_shader=CLOUD_PLANE_FRAGMENT_SHADER)
+        self.skybox_program = self._compile_builtin_program(SKYBOX_SHADER_RELATIVE, SKYBOX_VERTEX_SHADER, SKYBOX_FRAGMENT_SHADER, "skybox")
+        self.cloud_plane_program = self._compile_builtin_program(CLOUD_SHADER_RELATIVE, CLOUD_PLANE_VERTEX_SHADER, CLOUD_PLANE_FRAGMENT_SHADER, "cloud")
+        self.sprite_program = self._compile_builtin_program(SPRITE_SHADER_RELATIVE, SPRITE_VERTEX_SHADER, SPRITE_FRAGMENT_SHADER, "sprite")
+        self.ui_image_program = self._compile_builtin_program(UI_IMAGE_SHADER_RELATIVE, UI_VERTEX_SHADER, UI_FRAGMENT_SHADER, "ui image")
+        self.ui_text_program = self._compile_builtin_program(UI_TEXT_SHADER_RELATIVE, UI_VERTEX_SHADER, UI_FRAGMENT_SHADER, "ui text")
+        self.particle_program = self._compile_builtin_program(PARTICLE_SHADER_RELATIVE, PARTICLE_VERTEX_SHADER, PARTICLE_FRAGMENT_SHADER, "particle")
         self.skybox_buffer = None
         self.skybox_vao = None
         self.cloud_plane_buffer = None
         self.cloud_plane_vao = None
         self.cloud_plane_cache_key: tuple[float, float, int] | None = None
+        self.upscale_program = self.ctx.program(
+            vertex_shader="""
+                #version 330
+                in vec2 in_position;
+                in vec2 in_uv;
+                out vec2 v_uv;
+                void main() {
+                    v_uv = in_uv;
+                    gl_Position = vec4(in_position, 0.0, 1.0);
+                }
+            """,
+            fragment_shader="""
+                #version 330
+                uniform sampler2D u_texture;
+                in vec2 v_uv;
+                out vec4 fragColor;
+                void main() {
+                    fragColor = texture(u_texture, v_uv);
+                }
+            """,
+        )
+        self._render_target_cache: dict[tuple[int, int], tuple[Any, Any, Any]] = {}
+        self._text_texture_cache: dict[tuple[str, str, str, str, float, tuple[float, float, float], float], TextTexture] = {}
         self._program_cache: dict[str | None, Any] = {None: self.program, "__p64_error__": self.error_program}
         self._metadata: dict[str, AssetMetadata] = {}
         self._texture_cache: dict[Path, Any] = {}
@@ -141,6 +190,7 @@ class SceneRenderer:
         self._mesh_collider_line_cache: dict[tuple[str, str | None], RenderLineMesh] = {}
         self._convex_collider_line_cache: dict[tuple[str, str | None], RenderLineMesh] = {}
         self._white_texture = None
+        self._transparent_texture = None
         self._logged_scene_stats = False
         self.reload_assets()
 
@@ -168,6 +218,41 @@ class SceneRenderer:
         camera: RenderCamera | None = None,
         selected_entity_id: str | None = None,
         show_grid: bool = True,
+        game_view: bool = False,
+        output_framebuffer: Any | None = None,
+    ) -> bool:
+        render_settings = clamp_render_settings({**default_render_settings(), **scene.render_settings})
+        missing_camera = game_view and scene.active_camera() is None
+        if missing_camera:
+            self.ctx.viewport = (0, 0, max(width, 1), max(height, 1))
+            self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+            return False
+        if game_view and _scene_resolution_mode(scene) == "fixed" and hasattr(self.ctx, "framebuffer"):
+            target_width, target_height = _game_render_size(scene, render_settings)
+            color, _depth, framebuffer = self._render_target(target_width, target_height)
+            framebuffer.use()
+            self._render_scene(scene, target_width, target_height, camera, selected_entity_id, show_grid, render_settings)
+            if output_framebuffer is not None:
+                output_framebuffer.use()
+            self.ctx.viewport = (0, 0, max(width, 1), max(height, 1))
+            self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+            self._draw_upscaled_texture(color)
+            return True
+        render_width, render_height = (max(width, 1), max(height, 1))
+        if game_view and _scene_resolution_mode(scene) == "fixed":
+            render_width, render_height = _game_render_size(scene, render_settings)
+        self._render_scene(scene, render_width, render_height, camera, selected_entity_id, show_grid, render_settings)
+        return True
+
+    def _render_scene(
+        self,
+        scene: Scene,
+        width: int,
+        height: int,
+        camera: RenderCamera | None,
+        selected_entity_id: str | None,
+        show_grid: bool,
+        render_settings: dict[str, Any],
     ) -> None:
         self.ctx.viewport = (0, 0, max(width, 1), max(height, 1))
         self.ctx.clear(0.22, 0.27, 0.33, 1.0)
@@ -183,17 +268,19 @@ class SceneRenderer:
         self._current_view = view
         self._current_projection = projection
         self._current_render_settings = render_settings
+        self._render_time = float(getattr(self, "_render_time", 0.0)) + (1.0 / 60.0)
         if render_settings.get("skybox_enabled", True):
             self._draw_skybox(render_camera, render_settings)
             self._draw_cloud_plane(render_camera, view, projection, render_settings)
         submitted = 0
-        for entity in scene.walk():
-            if not entity.active:
-                continue
+        for entity in scene.walk_active():
             for component in entity.components:
                 if isinstance(component, MeshRenderer) and component.enabled and component.visible:
                     if self._draw_mesh(entity, component):
                         submitted += 1
+        self._draw_world_sprites(scene, render_camera, view, projection)
+        self._draw_particles(scene, render_camera, view, projection)
+        self._draw_ui(scene, width, height)
         if not self._logged_scene_stats:
             self.log(f"Scene renderer submitted {submitted} mesh renderer(s); metadata loaded: {len(self._metadata)}")
             self._logged_scene_stats = True
@@ -217,9 +304,7 @@ class SceneRenderer:
         origin, direction = _screen_ray(render_camera, width, height, screen_x, screen_y)
         best_id: str | None = None
         best_distance: float | None = None
-        for entity in scene.walk():
-            if not entity.active:
-                continue
+        for entity in scene.walk_active():
             matrix = entity.transform.world_matrix(entity)
             for component in entity.components:
                 if not isinstance(component, MeshRenderer) or not component.enabled or not component.visible:
@@ -326,6 +411,39 @@ class SceneRenderer:
         self.cloud_plane_buffer = None
         self.cloud_plane_cache_key = None
 
+    def _render_target(self, width: int, height: int) -> tuple[Any, Any, Any]:
+        key = (max(1, int(width)), max(1, int(height)))
+        if key not in self._render_target_cache:
+            color = self.ctx.texture(key, 4)
+            color.filter = (self.moderngl.NEAREST, self.moderngl.NEAREST)
+            depth = self.ctx.depth_renderbuffer(key)
+            framebuffer = self.ctx.framebuffer(color_attachments=[color], depth_attachment=depth)
+            self._render_target_cache[key] = (color, depth, framebuffer)
+        return self._render_target_cache[key]
+
+    def _draw_upscaled_texture(self, texture: Any) -> None:
+        import struct
+
+        vertices = [
+            -1.0, -1.0, 0.0, 0.0,
+            1.0, -1.0, 1.0, 0.0,
+            1.0, 1.0, 1.0, 1.0,
+            -1.0, -1.0, 0.0, 0.0,
+            1.0, 1.0, 1.0, 1.0,
+            -1.0, 1.0, 0.0, 1.0,
+        ]
+        buffer = self.ctx.buffer(struct.pack(f"{len(vertices)}f", *vertices))
+        vao = self.ctx.vertex_array(self.upscale_program, [(buffer, "2f 2f", "in_position", "in_uv")])
+        try:
+            texture.use(location=0)
+            self._set_uniform(self.upscale_program, "u_texture", 0)
+            if hasattr(self.moderngl, "DEPTH_TEST"):
+                self._safe_context_call("upscale/disable_depth", lambda: self.ctx.disable(self.moderngl.DEPTH_TEST))
+            vao.render()
+        finally:
+            buffer.release()
+            vao.release()
+
     def _begin_background_pass(self, blend: bool) -> bool:
         self._background_has_depth_mask, self._background_previous_depth_mask = self._safe_get_context_attr("depth_mask", "begin/depth_mask")
         self._background_has_blend_func, self._background_previous_blend_func = self._safe_get_context_attr("blend_func", "begin/blend_func")
@@ -349,10 +467,38 @@ class SceneRenderer:
         if hasattr(self.moderngl, "DEPTH_TEST"):
             self._safe_context_call("end/enable_depth", lambda: self.ctx.enable(self.moderngl.DEPTH_TEST))
 
+    def _begin_transparent_pass(self, depth_test: bool, additive: bool = False) -> None:
+        _has_depth, self._transparent_previous_depth_mask = self._safe_get_context_attr("depth_mask", "transparent/depth_mask")
+        self._transparent_has_blend_func, self._transparent_previous_blend_func = self._safe_get_context_attr("blend_func", "transparent/blend_func")
+        if _has_depth:
+            self._safe_set_context_attr("depth_mask", False, "transparent/depth_mask")
+        if hasattr(self.moderngl, "DEPTH_TEST"):
+            if depth_test:
+                self._safe_context_call("transparent/enable_depth", lambda: self.ctx.enable(self.moderngl.DEPTH_TEST))
+            else:
+                self._safe_context_call("transparent/disable_depth", lambda: self.ctx.disable(self.moderngl.DEPTH_TEST))
+        if hasattr(self.moderngl, "BLEND"):
+            self._safe_context_call("transparent/enable_blend", lambda: self.ctx.enable(self.moderngl.BLEND))
+            if self._transparent_has_blend_func and hasattr(self.moderngl, "SRC_ALPHA") and hasattr(self.moderngl, "ONE_MINUS_SRC_ALPHA"):
+                dst = self.moderngl.ONE if additive and hasattr(self.moderngl, "ONE") else self.moderngl.ONE_MINUS_SRC_ALPHA
+                self._safe_set_context_attr("blend_func", (self.moderngl.SRC_ALPHA, dst), "transparent/blend_func")
+
+    def _end_transparent_pass(self, depth_test: bool) -> None:
+        if hasattr(self.moderngl, "BLEND"):
+            self._safe_context_call("transparent/disable_blend", lambda: self.ctx.disable(self.moderngl.BLEND))
+        if getattr(self, "_transparent_has_blend_func", False):
+            self._safe_set_context_attr("blend_func", self._transparent_previous_blend_func, "transparent/blend_func_restore")
+        if getattr(self, "_transparent_previous_depth_mask", None) is not None:
+            self._safe_set_context_attr("depth_mask", self._transparent_previous_depth_mask, "transparent/depth_mask_restore")
+        if hasattr(self.moderngl, "DEPTH_TEST"):
+            self._safe_context_call("transparent/enable_depth_restore", lambda: self.ctx.enable(self.moderngl.DEPTH_TEST))
+
     def _safe_get_context_attr(self, name: str, stage: str) -> tuple[bool, Any]:
         try:
             return True, getattr(self.ctx, name)
         except AttributeError:
+            return False, None
+        except NotImplementedError:
             return False, None
         except Exception as exc:
             self.log(f"Background pass {stage} failed: {_render_exception_text(exc)}")
@@ -361,6 +507,8 @@ class SceneRenderer:
     def _safe_set_context_attr(self, name: str, value: Any, stage: str) -> None:
         try:
             setattr(self.ctx, name, value)
+        except NotImplementedError:
+            return
         except Exception as exc:
             self.log(f"Background pass {stage} failed: {_render_exception_text(exc)}")
 
@@ -386,7 +534,7 @@ class SceneRenderer:
             if index < len(lights):
                 entity, light = lights[index]
                 position = _world_position(entity)
-                direction = camera_basis(entity.transform.rotation)[0]
+                direction = world_forward(entity)
                 kind_value = _light_kind_code(light)
                 position_value = (position.x, position.y, position.z)
                 direction_value = (direction.x, direction.y, direction.z)
@@ -442,8 +590,8 @@ class SceneRenderer:
             self._set_uniform(program, "u_fog_density", 0.0)
             return
         entity, fog = fog_volume
-        center = entity.transform.position
-        scale = entity.transform.scale
+        center = _world_position(entity)
+        scale = world_scale(entity)
         size = Vec3(fog.size.x * scale.x, fog.size.y * scale.y, fog.size.z * scale.z)
         self._set_uniform(program, "u_fog_enabled", True)
         self._set_uniform(program, "u_fog_color", (fog.color.x, fog.color.y, fog.color.z))
@@ -485,6 +633,298 @@ class SceneRenderer:
         self._apply_material_properties(program, mesh.material_properties)
         mesh.vao.render()
         return True
+
+    def _draw_world_sprites(self, scene: Scene, camera: RenderCamera, view: list[float], projection: list[float]) -> None:
+        items: list[tuple[int, float, Entity, SpriteRenderer]] = []
+        for entity in scene.walk_active():
+            for component in entity.components:
+                if isinstance(component, SpriteRenderer) and component.enabled:
+                    position = _world_position(entity)
+                    distance = _distance_squared(position, camera.position)
+                    items.append((int(component.sorting_order), -distance, entity, component))
+        items.sort(key=lambda item: (item[0], item[1]))
+        for _order, _distance, entity, component in items:
+            vertices = sprite_quad_vertices(entity, component, camera, getattr(self, "_render_time", 0.0))
+            material_asset = self._load_material_asset(resolve_material_reference(self.project.root, component.material))
+            shader = material_asset.shader if material_asset is not None else SPRITE_SHADER_RELATIVE
+            program = self._program_for(shader)
+            texture = self._component_texture(component.texture, material_asset, component.material)
+            self._draw_textured_quad_batch(vertices, program, texture, view, projection, _identity_matrix(), component.color, component.alpha, material_asset)
+
+    def _draw_particles(self, scene: Scene, camera: RenderCamera, view: list[float], projection: list[float]) -> None:
+        dt = 1.0 / 60.0
+        for entity in scene.walk_active():
+            for component in entity.components:
+                if not isinstance(component, ParticleEmitter) or not component.enabled:
+                    continue
+                self._step_particle_emitter(entity, component, dt)
+                vertices = particle_quad_vertices(entity, component, camera)
+                if not vertices:
+                    continue
+                material_asset = self._load_material_asset(resolve_material_reference(self.project.root, component.material))
+                shader = material_asset.shader if material_asset is not None else PARTICLE_SHADER_RELATIVE
+                program = self._program_for(shader)
+                texture = self._component_texture(component.texture, material_asset, component.material)
+                self._draw_textured_quad_batch(vertices, program, texture, view, projection, _identity_matrix(), component.start_color, component.start_alpha, material_asset, additive=component.blend_mode == "additive")
+
+    def _draw_ui(self, scene: Scene, width: int, height: int) -> None:
+        canvases = _canvas_entities(scene)
+        ui_roots: list[tuple[list[Entity], Canvas]] = (
+            [(list(canvas_entity.walk()), canvas) for canvas_entity, canvas in sorted(canvases, key=lambda item: int(item[1].sort_order))]
+            if canvases
+            else [(list(scene.walk_active()), Canvas())]
+        )
+        for entities, canvas in ui_roots:
+            if not canvas.enabled:
+                continue
+            layout_width, layout_height = _canvas_layout_size(canvas, width, height)
+            ui_rects = _canvas_entity_rects(entities[0] if canvases and entities else None, layout_width, layout_height)
+            for entity in entities:
+                if not entity_effectively_active(entity):
+                    continue
+                entity_rect = ui_rects.get(entity.id)
+                for component in entity.components:
+                    if isinstance(component, UIImage) and component.enabled:
+                        vertices = ui_quad_vertices(component, layout_width, layout_height, getattr(self, "_render_time", 0.0), entity_rect)
+                        material_asset = self._load_material_asset(resolve_material_reference(self.project.root, component.material))
+                        shader = material_asset.shader if material_asset is not None else UI_IMAGE_SHADER_RELATIVE
+                        program = self._program_for(shader)
+                        texture = self._component_texture(component.texture, material_asset, component.material)
+                        self._draw_ui_quad_batch(vertices, program, texture, layout_width, layout_height, component.color, component.alpha, material_asset)
+                    elif isinstance(component, UIText) and component.enabled:
+                        text_texture = self._text_texture(component)
+                        vertices = ui_text_vertices(component, layout_width, layout_height, entity_rect, text_texture.size)
+                        self._draw_ui_quad_batch(vertices, self._program_for(UI_TEXT_SHADER_RELATIVE), text_texture.texture, layout_width, layout_height, Vec3(1.0, 1.0, 1.0), component.alpha, None)
+
+    def _draw_textured_quad_batch(
+        self,
+        vertices: list[float],
+        program: Any,
+        texture: Any,
+        view: list[float],
+        projection: list[float],
+        model: list[float],
+        color: Vec3,
+        alpha: float,
+        material_asset: MaterialAsset | None,
+        additive: bool = False,
+    ) -> None:
+        if not vertices:
+            return
+        try:
+            import struct
+
+            buffer = self.ctx.buffer(struct.pack(f"{len(vertices)}f", *vertices))
+            vao = self.ctx.vertex_array(program, [(buffer, SPRITE_VERTEX_LAYOUT, "in_position", "in_uv", "in_color")], skip_errors=True)
+            texture.use(location=0)
+            self._set_uniform(program, "u_texture", 0)
+            self._set_uniform(program, "u_model", _mat4_bytes(model), write=True)
+            self._set_uniform(program, "u_view", _mat4_bytes(view), write=True)
+            self._set_uniform(program, "u_projection", _mat4_bytes(projection), write=True)
+            self._set_uniform(program, "u_base_color", _vec3_values(color))
+            self._set_uniform(program, "u_alpha", max(0.0, min(1.0, float(alpha))))
+            self._set_uniform(program, "u_alpha_cutoff", 0.0)
+            if material_asset is not None:
+                self._apply_material_properties(program, material_asset.properties)
+            self._begin_transparent_pass(depth_test=True, additive=additive)
+            vao.render()
+            buffer.release()
+            vao.release()
+        except Exception as exc:
+            self.log(f"Sprite batch render failed: {_render_exception_text(exc)}")
+        finally:
+            self._end_transparent_pass(depth_test=True)
+
+    def _draw_ui_quad_batch(self, vertices: list[float], program: Any, texture: Any, width: int, height: int, color: Vec3, alpha: float, material_asset: MaterialAsset | None) -> None:
+        if not vertices:
+            return
+        try:
+            import struct
+
+            clip_vertices = ui_vertices_to_ndc(vertices, width, height)
+            buffer = self.ctx.buffer(struct.pack(f"{len(clip_vertices)}f", *clip_vertices))
+            vao = self.ctx.vertex_array(program, [(buffer, SPRITE_VERTEX_LAYOUT, "in_position", "in_uv", "in_color")], skip_errors=True)
+            texture.use(location=0)
+            self._set_uniform(program, "u_texture", 0)
+            self._set_uniform(program, "u_base_color", _vec3_values(color))
+            self._set_uniform(program, "u_alpha", max(0.0, min(1.0, float(alpha))))
+            self._set_uniform(program, "u_alpha_cutoff", 0.0)
+            if material_asset is not None:
+                self._apply_material_properties(program, material_asset.properties)
+            self._begin_transparent_pass(depth_test=False, additive=False)
+            vao.render()
+            buffer.release()
+            vao.release()
+        except Exception as exc:
+            self.log(f"UI batch render failed: {_render_exception_text(exc)}")
+        finally:
+            self._end_transparent_pass(depth_test=False)
+
+    def _step_particle_emitter(self, entity: Entity, emitter: ParticleEmitter, dt: float) -> None:
+        if emitter._runtime_playing:
+            if emitter.burst > 0 and not emitter._runtime_burst_done:
+                emitter.emit(emitter.burst)
+                emitter._runtime_burst_done = True
+            emitter._runtime_accumulator += max(0.0, float(emitter.rate)) * dt
+            while emitter._runtime_accumulator >= 1.0:
+                emitter.emit(1)
+                emitter._runtime_accumulator -= 1.0
+                if not emitter.looping and len(emitter._runtime_particles) >= max(0, int(emitter.max_particles)):
+                    emitter.stop()
+                    break
+        origin = _world_position(entity)
+        alive: list[dict[str, Any]] = []
+        for particle in emitter._runtime_particles:
+            age = float(particle.get("age", 0.0)) + dt
+            lifetime = max(0.001, float(particle.get("lifetime", emitter.lifetime)))
+            if age >= lifetime:
+                continue
+            velocity = particle.get("velocity")
+            position = particle.get("position")
+            if not isinstance(velocity, Vec3) or not isinstance(position, Vec3):
+                continue
+            velocity.x += emitter.gravity.x * dt
+            velocity.y += emitter.gravity.y * dt
+            velocity.z += emitter.gravity.z * dt
+            position.x += velocity.x * dt
+            position.y += velocity.y * dt
+            position.z += velocity.z * dt
+            particle["age"] = age
+            if not emitter.local_space and not particle.get("world_initialized"):
+                position.x += origin.x
+                position.y += origin.y
+                position.z += origin.z
+                particle["world_initialized"] = True
+            alive.append(particle)
+        emitter._runtime_particles = alive
+
+    def _component_texture(self, texture_reference: str, material_asset: MaterialAsset | None = None, material_reference_value: str | None = None) -> Any:
+        if material_asset is not None:
+            material_path = resolve_material_reference(self.project.root, material_reference_value)
+            path = self._material_texture_path(material_asset.textures.get("u_texture"), material_path)
+            if path and path.exists():
+                return self._load_texture(path)
+        path = self._texture_reference_path(texture_reference)
+        return self._load_texture(path) if path and path.exists() else self._default_texture()
+
+    def _texture_reference_path(self, texture_reference: str | None) -> Path | None:
+        if not texture_reference:
+            return None
+        path = Path(str(texture_reference))
+        if path.is_absolute():
+            return path
+        candidates = []
+        if str(texture_reference).startswith(("assets/", "packages/")):
+            candidates.append(self.project.root / texture_reference)
+        candidates.append(self.project.assets_dir / texture_reference)
+        return next((candidate for candidate in candidates if candidate.exists()), candidates[0] if candidates else None)
+
+    def _text_texture(self, component: UIText) -> TextTexture:
+        font_source = component.font_source if component.font_source in {"system", "asset"} else "system"
+        key = (component.text, font_source, component.font_family, component.bitmap_font, float(component.font_size), _vec3_values(component.color), float(component.alpha))
+        if key in self._text_texture_cache:
+            return self._text_texture_cache[key]
+        pil_error: Exception | None = None
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+
+            font_size = max(1, int(component.font_size))
+            font = self._resolve_text_font(ImageFont, component, font_source, font_size)
+            text = component.text or " "
+            dummy = Image.new("RGBA", (1, 1))
+            draw = ImageDraw.Draw(dummy)
+            bounds = draw.textbbox((0, 0), text, font=font)
+            width = max(1, bounds[2] - bounds[0] + 4)
+            height = max(1, bounds[3] - bounds[1] + 4)
+            mask = Image.new("L", (width, height), 0)
+            draw = ImageDraw.Draw(mask)
+            draw.text((2 - bounds[0], 2 - bounds[1]), text, font=font, fill=255)
+            pixels = bytearray()
+            for alpha in mask.tobytes():
+                if alpha:
+                    pixels.extend((255, 255, 255, alpha))
+                else:
+                    pixels.extend((0, 0, 0, 0))
+            image = Image.frombytes("RGBA", (width, height), bytes(pixels))
+            image = image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+            texture = self.ctx.texture(image.size, 4, image.tobytes())
+            texture.filter = self._texture_filter()
+            result = TextTexture(texture, (width, height))
+            self._text_texture_cache[key] = result
+            return result
+        except Exception as exc:
+            pil_error = exc
+        try:
+            result = self._text_texture_qt(component, font_source)
+            self._text_texture_cache[key] = result
+            return result
+        except Exception as exc:
+            self.log(f"Could not render UI text texture: PIL={_render_exception_text(pil_error) if pil_error is not None else 'not tried'}; Qt={_render_exception_text(exc)}")
+            result = TextTexture(self._transparent_default_texture(), _fallback_text_size(component))
+            self._text_texture_cache[key] = result
+            return result
+
+    def _text_texture_qt(self, component: UIText, font_source: str) -> TextTexture:
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QImage, QPainter
+
+        font_size = max(1, int(component.font_size))
+        font = QFont()
+        if font_source == "asset" and component.bitmap_font:
+            font_path = self._texture_reference_path(component.bitmap_font)
+            if font_path and font_path.exists():
+                font_id = QFontDatabase.addApplicationFont(str(font_path))
+                families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+                if families:
+                    font = QFont(families[0])
+                else:
+                    self.log(f"UI text font asset missing or invalid: {component.bitmap_font}")
+            else:
+                self.log(f"UI text font asset missing: {component.bitmap_font}")
+        elif component.font_family and component.font_family != "System":
+            font = QFont(component.font_family)
+        font.setPixelSize(font_size)
+
+        text = component.text or " "
+        metrics = QFontMetrics(font)
+        bounds = metrics.boundingRect(text)
+        width = max(1, bounds.width() + 4)
+        height = max(1, metrics.height() + 4)
+        image = QImage(width, height, QImage.Format.Format_RGBA8888)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.setFont(font)
+            painter.setPen(QColor(255, 255, 255, 255))
+            painter.drawText(2 - bounds.x(), 2 + metrics.ascent(), text)
+        finally:
+            painter.end()
+        image = image.mirrored(False, True)
+        data = bytes(image.bits())
+        expected = width * height * 4
+        if len(data) > expected:
+            data = data[:expected]
+        texture = self.ctx.texture((width, height), 4, data)
+        texture.filter = self._texture_filter()
+        return TextTexture(texture, (width, height))
+
+    def _resolve_text_font(self, image_font: Any, component: UIText, font_source: str, font_size: int) -> Any:
+        try:
+            if font_source == "asset":
+                font_path = self._texture_reference_path(component.bitmap_font)
+                if font_path and font_path.exists():
+                    return image_font.truetype(str(font_path), font_size)
+                if component.bitmap_font:
+                    self.log(f"UI text font asset missing: {component.bitmap_font}")
+                return image_font.load_default()
+            if component.font_family and component.font_family != "System":
+                return image_font.truetype(component.font_family, font_size)
+            return image_font.load_default()
+        except Exception as exc:
+            label = component.bitmap_font if font_source == "asset" else component.font_family
+            self.log(f"UI text font fallback for {label or font_source}: {_render_exception_text(exc)}")
+            return image_font.load_default()
 
     def _load_mesh(self, entity: Entity, component: MeshRenderer) -> RenderMesh | None:
         cache_key = (component.mesh, component.submesh, component.material, component.shader, tuple(component.source_materials), tuple(component.material_slots))
@@ -640,7 +1080,7 @@ class SceneRenderer:
     def _selection_mesh_renderers(self, entity: Entity) -> list[tuple[Entity, MeshRenderer]]:
         renderers: list[tuple[Entity, MeshRenderer]] = []
         for candidate in entity.walk():
-            if not candidate.active:
+            if not entity_effectively_active(candidate):
                 continue
             for component in candidate.components:
                 if isinstance(component, MeshRenderer) and component.enabled and component.visible:
@@ -648,9 +1088,7 @@ class SceneRenderer:
         return renderers
 
     def _draw_component_gizmos(self, scene: Scene, view: list[float], projection: list[float], selected: Entity | None = None) -> None:
-        for entity in scene.walk():
-            if not entity.active:
-                continue
+        for entity in scene.walk_active():
             for component in entity.components:
                 if isinstance(component, Collider) and component.enabled:
                     color = (0.25, 0.8, 0.35) if not component.is_trigger else (0.25, 0.65, 1.0)
@@ -670,6 +1108,10 @@ class SceneRenderer:
                     self._draw_audio_source_ranges(entity, component, view, projection)
                 elif selected is entity and isinstance(component, Camera) and component.enabled:
                     self._draw_camera_frustum(entity, component, view, projection)
+                elif selected is entity and isinstance(component, SpriteRenderer) and component.enabled:
+                    self._draw_sprite_gizmo(entity, component, view, projection)
+                elif selected is entity and isinstance(component, ParticleEmitter) and component.enabled:
+                    self._draw_particle_emitter_gizmo(entity, component, view, projection)
 
     def _draw_audio_source_ranges(self, entity: Entity, source: AudioSource, view: list[float], projection: list[float]) -> None:
         center = _world_position(entity)
@@ -679,13 +1121,38 @@ class SceneRenderer:
         if max_radius > 0.0 and max_radius != min_radius:
             self._draw_world_sphere(center, max_radius, view, projection, (0.1, 0.45, 1.0))
 
+    def _draw_sprite_gizmo(self, entity: Entity, component: SpriteRenderer, view: list[float], projection: list[float]) -> None:
+        camera = getattr(self, "_current_camera", RenderCamera(position=Vec3(), rotation=Vec3()))
+        quad = sprite_quad_vertices(entity, component, camera)
+        if len(quad) < SPRITE_VERTEX_FLOATS * 6:
+            return
+        points = [quad[index:index + 3] for index in range(0, len(quad), SPRITE_VERTEX_FLOATS)]
+        order = [0, 1, 2, 5, 0]
+        vertices: list[float] = []
+        for start, end in zip(order, order[1:]):
+            vertices.extend(points[start])
+            vertices.extend(points[end])
+        self._draw_lines(vertices, view, projection, (1.0, 0.72, 0.25), _identity_matrix())
+
+    def _draw_particle_emitter_gizmo(self, entity: Entity, component: ParticleEmitter, view: list[float], projection: list[float]) -> None:
+        radius = max(0.1, component.start_size * 2.0)
+        self._draw_world_sphere(_world_position(entity), radius, view, projection, (1.0, 0.35, 0.15))
+
     def _draw_camera_frustum(self, entity: Entity, camera: Camera, view: list[float], projection: list[float]) -> None:
         aspect = float(getattr(self, "_current_aspect", 16.0 / 9.0))
-        vertices = camera_frustum_vertices(_world_position(entity), entity.transform.rotation, camera.fov, camera.near, camera.far, aspect)
+        vertices = camera_frustum_vertices(
+            _world_position(entity),
+            world_rotation(entity),
+            camera.fov,
+            camera.near,
+            camera.far,
+            aspect,
+            (world_forward(entity), world_right(entity), world_up(entity)),
+        )
         self._draw_lines(vertices, view, projection, (1.0, 0.78, 0.2), _identity_matrix())
 
     def _draw_spawn_marker(self, entity: Entity, view: list[float], projection: list[float]) -> None:
-        p = entity.transform.position
+        p = _world_position(entity)
         size = 0.35
         vertices = [
             p.x - size, p.y, p.z, p.x + size, p.y, p.z,
@@ -905,6 +1372,16 @@ class SceneRenderer:
                 self.log(f"Builtin standard shader failed, using embedded fallback: {exc}")
         return self.ctx.program(vertex_shader=STANDARD_VERTEX_LIT_VERTEX_SHADER, fragment_shader=STANDARD_VERTEX_LIT_FRAGMENT_SHADER)
 
+    def _compile_builtin_program(self, relative: str, fallback_vertex: str, fallback_fragment: str, label: str) -> Any:
+        shader_path = self.project.root / relative
+        if shader_path.exists():
+            try:
+                source = parse_shader(shader_path)
+                return self.ctx.program(vertex_shader=source.vertex, fragment_shader=source.fragment)
+            except Exception as exc:
+                self.log(f"Builtin {label} shader failed, using embedded fallback: {_render_exception_text(exc)}")
+        return self.ctx.program(vertex_shader=fallback_vertex, fragment_shader=fallback_fragment)
+
     def _set_uniform(self, program: Any, name: str, value: Any, write: bool = False) -> None:
         try:
             uniform = program[name]
@@ -1030,6 +1507,12 @@ class SceneRenderer:
             self._white_texture.filter = self._texture_filter()
         return self._white_texture
 
+    def _transparent_default_texture(self) -> Any:
+        if self._transparent_texture is None:
+            self._transparent_texture = self.ctx.texture((1, 1), 4, bytes([0, 0, 0, 0]))
+            self._transparent_texture.filter = self._texture_filter()
+        return self._transparent_texture
+
     def _texture_filter(self) -> tuple[Any, Any]:
         if str(self.project.render_settings.get("texture_filter", "three_point")) == "linear":
             linear = getattr(self.moderngl, "LINEAR", self.moderngl.NEAREST)
@@ -1068,7 +1551,16 @@ def _camera_from_entity(camera_entity: Entity | None) -> RenderCamera:
             near = component.near
             far = component.far
             break
-    return RenderCamera(camera_entity.transform.position, camera_entity.transform.rotation, fov, near, far)
+    return RenderCamera(
+        world_position(camera_entity),
+        world_rotation(camera_entity),
+        fov,
+        near,
+        far,
+        world_forward(camera_entity),
+        world_right(camera_entity),
+        world_up(camera_entity),
+    )
 
 
 def _light_kind_code(light: Light) -> int:
@@ -1079,9 +1571,330 @@ def _texture_filter_code(value: str) -> int:
     return {"nearest": 0, "linear": 1, "three_point": 2}.get(value, 2)
 
 
+def _internal_resolution(settings: dict[str, Any]) -> tuple[int, int]:
+    resolution = settings.get("internal_resolution", [320, 240])
+    if not isinstance(resolution, (list, tuple)) or len(resolution) < 2:
+        return 320, 240
+    try:
+        return max(1, int(resolution[0])), max(1, int(resolution[1]))
+    except (TypeError, ValueError):
+        return 320, 240
+
+
+def _scene_resolution_mode(scene: Scene) -> str:
+    canvases = _canvas_entities(scene)
+    if any(canvas.resolution_mode == "fixed" for _entity, canvas in canvases):
+        return "fixed"
+    return "auto"
+
+
+def _game_render_size(scene: Scene, settings: dict[str, Any]) -> tuple[int, int]:
+    for _entity, canvas in _canvas_entities(scene):
+        if canvas.resolution_mode == "fixed":
+            return _canvas_reference_size(canvas)
+    return _internal_resolution(settings)
+
+
+def _canvas_layout_size(canvas: Canvas, width: int, height: int) -> tuple[int, int]:
+    if canvas.resolution_mode == "fixed":
+        return _canvas_reference_size(canvas)
+    return max(1, int(width)), max(1, int(height))
+
+
+def _canvas_reference_size(canvas: Canvas) -> tuple[int, int]:
+    return (
+        max(1, int(canvas.reference_resolution.x)),
+        max(1, int(canvas.reference_resolution.y)),
+    )
+
+
+def ui_layout_debug(scene: Scene, width: int, height: int, text_size_getter: Callable[[UIText], tuple[int, int]] | None = None) -> list[UILayoutDebugEntry]:
+    entries: list[UILayoutDebugEntry] = []
+    canvases = _canvas_entities(scene)
+    roots: list[tuple[list[Entity], Canvas]] = (
+        [(list(canvas_entity.walk()), canvas) for canvas_entity, canvas in sorted(canvases, key=lambda item: int(item[1].sort_order))]
+        if canvases
+        else [(list(scene.walk_active()), Canvas())]
+    )
+    for entities, canvas in roots:
+        if not canvas.enabled:
+            continue
+        layout_width, layout_height = _canvas_layout_size(canvas, width, height)
+        rects = _canvas_entity_rects(entities[0] if canvases and entities else None, layout_width, layout_height)
+        for entity in entities:
+            if not entity_effectively_active(entity):
+                continue
+            rect = rects.get(entity.id)
+            if rect is None:
+                continue
+            image_rects: list[tuple[float, float, float, float]] = []
+            text_rects: list[tuple[float, float, float, float]] = []
+            for component in entity.components:
+                if isinstance(component, UIImage) and component.enabled:
+                    image_rects.append(image_rect_for_fill_mode(component, rect))
+                elif isinstance(component, UIText) and component.enabled:
+                    texture_size = text_size_getter(component) if text_size_getter is not None else _fallback_text_size(component)
+                    text_rects.append(text_rect_with_aspect(component, rect, texture_size))
+            entries.append(UILayoutDebugEntry(entity.id, entity.name, rect, tuple(image_rects), tuple(text_rects)))
+    return entries
+
+
 def _world_position(entity: Entity) -> Vec3:
-    matrix = entity.transform.world_matrix(entity)
-    return Vec3(matrix[3], matrix[7], matrix[11])
+    return world_position(entity)
+
+
+def _distance_squared(a: Vec3, b: Vec3) -> float:
+    dx = a.x - b.x
+    dy = a.y - b.y
+    dz = a.z - b.z
+    return dx * dx + dy * dy + dz * dz
+
+
+def flipbook_uv_rect(columns: int, rows: int, fps: float, start: int, end: int, time_value: float) -> tuple[float, float, float, float]:
+    columns = max(1, int(columns))
+    rows = max(1, int(rows))
+    frame_count = columns * rows
+    start = max(0, min(frame_count - 1, int(start)))
+    end = max(start, min(frame_count - 1, int(end) if int(end) > 0 else frame_count - 1))
+    if fps > 0.0 and end > start:
+        frame = start + (int(max(0.0, time_value) * fps) % (end - start + 1))
+    else:
+        frame = start
+    col = frame % columns
+    row = frame // columns
+    u0 = col / columns
+    u1 = (col + 1) / columns
+    v0 = row / rows
+    v1 = (row + 1) / rows
+    return u0, v0, u1, v1
+
+
+def sprite_quad_vertices(entity: Entity, component: SpriteRenderer, camera: RenderCamera, time_value: float = 0.0) -> list[float]:
+    center = _world_position(entity)
+    _forward, camera_right, camera_up = render_camera_basis(camera)
+    if component.billboard == "none":
+        matrix = entity.transform.world_matrix(entity)
+        right = normalize(Vec3(matrix[0], matrix[4], matrix[8]))
+        up = normalize(Vec3(matrix[1], matrix[5], matrix[9]))
+    else:
+        right = camera_right
+        up = camera_up
+    scale = world_scale(entity)
+    width = max(0.001, float(component.size.x) * max(0.001, float(scale.x)))
+    height = max(0.001, float(component.size.y) * max(0.001, float(scale.y)))
+    return _quad_vertices_world(center, right, up, width, height, component.pivot, component.color, component.flipbook_columns, component.flipbook_rows, component.flipbook_fps, component.flipbook_start, component.flipbook_end, time_value)
+
+
+def particle_quad_vertices(entity: Entity, emitter: ParticleEmitter, camera: RenderCamera) -> list[float]:
+    _forward, right, up = render_camera_basis(camera)
+    origin = _world_position(entity)
+    vertices: list[float] = []
+    for particle in emitter._runtime_particles:
+        position = particle.get("position")
+        if not isinstance(position, Vec3):
+            continue
+        center = Vec3(position.x, position.y, position.z)
+        if emitter.local_space:
+            center.x += origin.x
+            center.y += origin.y
+            center.z += origin.z
+        age = float(particle.get("age", 0.0))
+        lifetime = max(0.001, float(particle.get("lifetime", emitter.lifetime)))
+        fade = max(0.0, min(1.0, 1.0 - age / lifetime))
+        size = max(0.001, float(particle.get("size", emitter.start_size)))
+        color = Vec3(fade, fade, fade)
+        vertices.extend(_quad_vertices_world(center, right, up, size, size, Vec3(0.5, 0.5, 0.0), color, emitter.flipbook_columns, emitter.flipbook_rows, emitter.flipbook_fps, emitter.flipbook_start, emitter.flipbook_end, age))
+    return vertices
+
+
+def ui_quad_vertices(component: UIImage, width: int, height: int, time_value: float = 0.0, rect: tuple[float, float, float, float] | None = None) -> list[float]:
+    x, y, w, h = image_rect_for_fill_mode(component, rect) if rect is not None else ui_rect(component.anchor, component.offset, component.size, component.pivot, width, height)
+    u0, v0, u1, v1 = flipbook_uv_rect(component.flipbook_columns, component.flipbook_rows, component.flipbook_fps, component.flipbook_start, component.flipbook_end, time_value)
+    if rect is not None and _image_fill_mode(component.fill_mode) == "fill":
+        u0, v0, u1, v1 = image_fill_uv_rect(component, rect, (u0, v0, u1, v1))
+    return _quad_vertices_2d(x, y, w, h, component.color, u0, v0, u1, v1)
+
+
+def ui_text_vertices(component: UIText, width: int, height: int, rect: tuple[float, float, float, float] | None = None, texture_size: tuple[int, int] | None = None) -> list[float]:
+    if rect is None:
+        measured_width, measured_height = texture_size or _fallback_text_size(component)
+        size = Vec3(float(measured_width), float(measured_height), 0.0)
+        x, y, w, h = ui_rect(component.anchor, component.offset, size, component.pivot, width, height)
+    else:
+        x, y, w, h = text_rect_with_aspect(component, rect, texture_size or _fallback_text_size(component))
+    return _quad_vertices_2d(x, y, w, h, component.color, 0.0, 0.0, 1.0, 1.0)
+
+
+def ui_vertices_to_ndc(vertices: list[float], width: int, height: int) -> list[float]:
+    if not vertices:
+        return []
+    safe_width = max(0.001, float(width))
+    safe_height = max(0.001, float(height))
+    converted = list(vertices)
+    for index in range(0, len(converted), 8):
+        converted[index] = (converted[index] / safe_width) * 2.0 - 1.0
+        converted[index + 1] = 1.0 - (converted[index + 1] / safe_height) * 2.0
+        converted[index + 2] = 0.0
+    return converted
+
+
+def ui_rect(anchor: str, offset: Vec3, size: Vec3, pivot: Vec3, width: int, height: int) -> tuple[float, float, float, float]:
+    anchors = {
+        "top-left": (0.0, 0.0),
+        "top": (0.5, 0.0),
+        "top-right": (1.0, 0.0),
+        "left": (0.0, 0.5),
+        "center": (0.5, 0.5),
+        "right": (1.0, 0.5),
+        "bottom-left": (0.0, 1.0),
+        "bottom": (0.5, 1.0),
+        "bottom-right": (1.0, 1.0),
+    }
+    ax, ay = anchors.get(anchor, anchors["center"])
+    w = max(0.001, float(size.x))
+    h = max(0.001, float(size.y))
+    x = float(width) * ax + offset.x - w * pivot.x
+    y = float(height) * ay + offset.y - h * pivot.y
+    return x, y, w, h
+
+
+def rect_transform_rect(rect: RectTransform, parent_rect: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    parent_x, parent_y, parent_w, parent_h = parent_rect
+    x, y, w, h = ui_rect(rect.anchor, rect.offset, rect.size, rect.pivot, int(parent_w), int(parent_h))
+    return parent_x + x, parent_y + y, w, h
+
+
+def image_rect_for_fill_mode(component: UIImage, rect: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    mode = _image_fill_mode(component.fill_mode)
+    if mode != "fit":
+        return rect
+    x, y, box_w, box_h = rect
+    box_w = max(0.001, float(box_w))
+    box_h = max(0.001, float(box_h))
+    image_w = max(0.001, float(component.size.x))
+    image_h = max(0.001, float(component.size.y))
+    scale = min(box_w / image_w, box_h / image_h)
+    w = max(0.001, image_w * scale)
+    h = max(0.001, image_h * scale)
+    return x + (box_w - w) * 0.5, y + (box_h - h) * 0.5, w, h
+
+
+def image_fill_uv_rect(component: UIImage, rect: tuple[float, float, float, float], uv: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    _x, _y, box_w, box_h = rect
+    box_w = max(0.001, float(box_w))
+    box_h = max(0.001, float(box_h))
+    image_w = max(0.001, float(component.size.x))
+    image_h = max(0.001, float(component.size.y))
+    scale = max(box_w / image_w, box_h / image_h)
+    visible_w = box_w / max(0.001, image_w * scale)
+    visible_h = box_h / max(0.001, image_h * scale)
+    u0, v0, u1, v1 = uv
+    du = (u1 - u0) * max(0.0, min(1.0, visible_w))
+    dv = (v1 - v0) * max(0.0, min(1.0, visible_h))
+    u_mid = (u0 + u1) * 0.5
+    v_mid = (v0 + v1) * 0.5
+    return u_mid - du * 0.5, v_mid - dv * 0.5, u_mid + du * 0.5, v_mid + dv * 0.5
+
+
+def _image_fill_mode(value: str) -> str:
+    mode = str(value or "stretch").lower()
+    if mode == "simple":
+        return "stretch"
+    return mode if mode in {"stretch", "fit", "fill"} else "stretch"
+
+
+def text_rect_with_aspect(component: UIText, rect: tuple[float, float, float, float], texture_size: tuple[int, int]) -> tuple[float, float, float, float]:
+    x, y, w, h = rect
+    box_w = max(4.0, float(w))
+    box_h = max(4.0, float(h))
+    tex_w = max(1.0, float(texture_size[0]))
+    tex_h = max(1.0, float(texture_size[1]))
+    scale = min(box_w / tex_w, box_h / tex_h)
+    text_w = max(1.0, tex_w * scale)
+    text_h = max(1.0, tex_h * scale)
+    alignment = component.alignment if component.alignment in {"left", "center", "right"} else "center"
+    if alignment == "left":
+        text_x = x
+    elif alignment == "right":
+        text_x = x + box_w - text_w
+    else:
+        text_x = x + (box_w - text_w) * 0.5
+    text_y = y + (box_h - text_h) * 0.5
+    return text_x, text_y, text_w, text_h
+
+
+def _fallback_text_size(component: UIText) -> tuple[int, int]:
+    font_size = max(1.0, float(component.font_size))
+    text = component.text or " "
+    return max(1, int(len(text) * font_size * 0.6) + 4), max(1, int(font_size * 1.25) + 4)
+
+
+def _quad_vertices_world(center: Vec3, right: Vec3, up: Vec3, width: float, height: float, pivot: Vec3, color: Vec3, columns: int, rows: int, fps: float, start: int, end: int, time_value: float) -> list[float]:
+    u0, v0, u1, v1 = flipbook_uv_rect(columns, rows, fps, start, end, time_value)
+    left = -pivot.x * width
+    right_offset = (1.0 - pivot.x) * width
+    top = (1.0 - pivot.y) * height
+    bottom = -pivot.y * height
+    corners = [
+        (left, bottom, u0, v1),
+        (right_offset, bottom, u1, v1),
+        (right_offset, top, u1, v0),
+        (left, bottom, u0, v1),
+        (right_offset, top, u1, v0),
+        (left, top, u0, v0),
+    ]
+    vertices: list[float] = []
+    for x, y, u, v in corners:
+        point = Vec3(
+            center.x + right.x * x + up.x * y,
+            center.y + right.y * x + up.y * y,
+            center.z + right.z * x + up.z * y,
+        )
+        vertices.extend([point.x, point.y, point.z, u, v, color.x, color.y, color.z])
+    return vertices
+
+
+def _quad_vertices_2d(x: float, y: float, width: float, height: float, color: Vec3, u0: float, v0: float, u1: float, v1: float) -> list[float]:
+    corners = [
+        (x, y + height, u0, v0),
+        (x + width, y + height, u1, v0),
+        (x + width, y, u1, v1),
+        (x, y + height, u0, v0),
+        (x + width, y, u1, v1),
+        (x, y, u0, v1),
+    ]
+    vertices: list[float] = []
+    for px, py, u, v in corners:
+        vertices.extend([px, py, 0.0, u, v, color.x, color.y, color.z])
+    return vertices
+
+
+def _canvas_entities(scene: Scene) -> list[tuple[Entity, Canvas]]:
+    canvases: list[tuple[Entity, Canvas]] = []
+    for entity in scene.walk_active():
+        for component in entity.components:
+            if isinstance(component, Canvas) and component.enabled:
+                canvases.append((entity, component))
+    if canvases:
+        return canvases
+    return []
+
+
+def _canvas_entity_rects(canvas_entity: Entity | None, width: int, height: int) -> dict[str, tuple[float, float, float, float]]:
+    if canvas_entity is None:
+        return {}
+    root_rect = (0.0, 0.0, float(max(width, 1)), float(max(height, 1)))
+    rects: dict[str, tuple[float, float, float, float]] = {}
+
+    def visit(entity: Entity, parent_rect: tuple[float, float, float, float]) -> None:
+        current_rect = rect_transform_rect(entity.rect_transform, parent_rect) if entity.rect_transform is not None else parent_rect
+        if entity.rect_transform is not None:
+            rects[entity.id] = current_rect
+        for child in entity.children:
+            visit(child, current_rect)
+
+    visit(canvas_entity, root_rect)
+    return rects
 
 
 def _is_selected_or_child_of_selected(entity: Entity, selected: Entity | None) -> bool:
@@ -1099,11 +1912,19 @@ def audio_source_range_radii(source: AudioSource) -> tuple[float, float]:
     return min_radius, max_radius
 
 
-def camera_frustum_vertices(position: Vec3, rotation: Vec3, fov: float, near: float, far: float, aspect: float) -> list[float]:
+def camera_frustum_vertices(
+    position: Vec3,
+    rotation: Vec3,
+    fov: float,
+    near: float,
+    far: float,
+    aspect: float,
+    basis: tuple[Vec3, Vec3, Vec3] | None = None,
+) -> list[float]:
     near = max(0.001, float(near))
     far = max(near + 0.001, float(far))
     aspect = max(0.01, float(aspect))
-    forward, right, up = camera_basis(rotation)
+    forward, right, up = basis or camera_basis(rotation)
 
     def plane_corners(distance: float) -> list[Vec3]:
         half_height = tan(radians(max(1.0, min(179.0, float(fov)))) * 0.5) * distance
@@ -1225,7 +2046,7 @@ def _grid_fade(distance: float, fade_start: float, fade_end: float) -> float:
 
 
 def _view_matrix(camera: RenderCamera) -> list[float]:
-    forward, right, up = camera_basis(camera.rotation)
+    forward, right, up = render_camera_basis(camera)
     position = camera.position
     return [
         right.x, right.y, right.z, -dot(right, position),
@@ -1242,6 +2063,12 @@ def camera_basis(rotation: Vec3) -> tuple[Vec3, Vec3, Vec3]:
     right = normalize(Vec3(cos(yaw), 0.0, sin(yaw)))
     up = normalize(cross(right, forward))
     return forward, right, up
+
+
+def render_camera_basis(camera: RenderCamera) -> tuple[Vec3, Vec3, Vec3]:
+    if camera.forward is not None and camera.right is not None and camera.up is not None:
+        return camera.forward.normalized(), camera.right.normalized(), camera.up.normalized()
+    return camera_basis(camera.rotation)
 
 
 def dot(a: Vec3, b: Vec3) -> float:
@@ -1270,6 +2097,18 @@ def _perspective_matrix(fov_degrees: float, aspect: float, near: float, far: flo
         0.0, f, 0.0, 0.0,
         0.0, 0.0, (far + near) / (near - far), (2 * far * near) / (near - far),
         0.0, 0.0, -1.0, 0.0,
+    ]
+
+
+def _orthographic_matrix(left: float, right: float, bottom: float, top: float, near: float, far: float) -> list[float]:
+    width = max(0.000001, right - left)
+    height = max(0.000001, top - bottom)
+    depth = max(0.000001, far - near)
+    return [
+        2.0 / width, 0.0, 0.0, -(right + left) / width,
+        0.0, 2.0 / height, 0.0, -(top + bottom) / height,
+        0.0, 0.0, -2.0 / depth, -(far + near) / depth,
+        0.0, 0.0, 0.0, 1.0,
     ]
 
 
@@ -1317,7 +2156,7 @@ def _screen_ray(camera: RenderCamera, width: int, height: int, screen_x: float, 
     aspect = max(width / height, 0.01)
     ndc_x = (float(screen_x) / width) * 2.0 - 1.0
     ndc_y = 1.0 - (float(screen_y) / height) * 2.0
-    forward, right, up = camera_basis(camera.rotation)
+    forward, right, up = render_camera_basis(camera)
     half_height = tan(radians(camera.fov) * 0.5)
     direction = normalize(
         Vec3(
