@@ -1,0 +1,31 @@
+{
+  "skybox_enabled": true,
+  "skybox_top_color": [
+    0.22,
+    0.48,
+    0.86
+  ],
+  "skybox_horizon_color": [
+    0.66,
+    0.82,
+    0.95
+  ],
+  "skybox_cloud_color": [
+    1.0,
+    0.96,
+    0.86
+  ],
+  "skybox_cloud_coverage": 0.45,
+  "skybox_cloud_scale": 3.0,
+  "skybox_cloud_height": 80.0,
+  "skybox_cloud_softness": 0.08,
+  "fog_enabled": true,
+  "fog_color": [
+    0.46,
+    0.58,
+    0.72
+  ],
+  "fog_near": 18.0,
+  "fog_far": 85.0,
+  "fog_density": 0.08
+}

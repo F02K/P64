@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from p64.engine.math import Vec3, compose_transform, multiply
+from p64.engine.math import Quaternion, Vec3, compose_transform, multiply
 
 
 @dataclass(slots=True)
@@ -12,6 +12,49 @@ class Transform:
     rotation: Vec3 = field(default_factory=Vec3)
     scale: Vec3 = field(default_factory=lambda: Vec3(1.0, 1.0, 1.0))
     _scene_object: Any | None = field(default=None, init=False, repr=False, compare=False)
+    _local_quaternion: Quaternion = field(default_factory=Quaternion.identity, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._bind_rotation(self.rotation)
+        object.__setattr__(self, "_local_quaternion", Quaternion.from_euler(self.rotation))
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name != "rotation" or not isinstance(value, Vec3):
+            return
+        self._bind_rotation(value)
+        try:
+            object.__getattribute__(self, "_local_quaternion")
+        except AttributeError:
+            return
+        object.__setattr__(self, "_local_quaternion", Quaternion.from_euler(value))
+
+    def _bind_rotation(self, rotation: Vec3) -> None:
+        rotation.bind_on_change(self._rotation_changed)
+
+    def _rotation_changed(self) -> None:
+        object.__setattr__(self, "_local_quaternion", Quaternion.from_euler(self.rotation))
+
+    @property
+    def local_quaternion(self) -> Quaternion:
+        return self._local_quaternion.copy()
+
+    @local_quaternion.setter
+    def local_quaternion(self, value: Quaternion) -> None:
+        quaternion = Quaternion.from_value(value)
+        object.__setattr__(self, "_local_quaternion", quaternion)
+        euler = quaternion.to_euler()
+        object.__setattr__(self.rotation, "x", euler.x)
+        object.__setattr__(self.rotation, "y", euler.y)
+        object.__setattr__(self.rotation, "z", euler.z)
+
+    @property
+    def world_quaternion(self) -> Quaternion:
+        if self._scene_object is None:
+            return self.local_quaternion
+        from p64.engine.transforms import world_quaternion
+
+        return world_quaternion(self._scene_object)
 
     def bind_scene_object(self, scene_object: Any | None) -> None:
         self._scene_object = scene_object
@@ -25,7 +68,7 @@ class Transform:
         return self.scene_object
 
     def local_matrix(self) -> list[float]:
-        return compose_transform(self.position, self.rotation, self.scale)
+        return compose_transform(self.position, self._local_quaternion, self.scale)
 
     def world_matrix(self, entity: Any | None = None) -> list[float]:
         entity = entity or self._scene_object
@@ -82,9 +125,8 @@ class Transform:
         return transform_point(self.world_matrix(), point)
 
     def transform_direction(self, direction: Vec3) -> Vec3:
-        from p64.engine.transforms import transform_direction
-
-        return transform_direction(self.world_matrix(), direction)
+        rotated = self.world_quaternion * direction.normalized()
+        return rotated.normalized() if isinstance(rotated, Vec3) else Vec3()
 
     def inverse_transform_point(self, point: Vec3) -> Vec3:
         if self._scene_object is None:
@@ -96,35 +138,37 @@ class Transform:
         return world_to_local_point(self._scene_object, point)
 
     def inverse_transform_direction(self, direction: Vec3) -> Vec3:
-        if self._scene_object is None:
-            from p64.engine.transforms import transform_direction, _inverse_affine
-
-            return transform_direction(_inverse_affine(self.local_matrix()), direction)
-        from p64.engine.transforms import world_to_local_direction
-
-        return world_to_local_direction(self._scene_object, direction)
+        quaternion = self.world_quaternion if self._scene_object is not None else self.local_quaternion
+        rotated = quaternion.inverse() * direction.normalized()
+        return rotated.normalized() if isinstance(rotated, Vec3) else Vec3()
 
     def _local_direction(self, direction: Vec3) -> Vec3:
-        from p64.engine.math import rotation_xyz
-        from p64.engine.transforms import transform_direction
-
-        return transform_direction(rotation_xyz(self.rotation), direction)
+        rotated = self._local_quaternion * direction
+        return rotated if isinstance(rotated, Vec3) else direction.copy()
 
     def to_dict(self) -> dict[str, list[float]]:
         return {
             "position": self.position.to_list(),
             "rotation": self.rotation.to_list(),
+            "rotation_quaternion": self._local_quaternion.to_list(),
             "scale": self.scale.to_list(),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "Transform":
         data = data or {}
-        return cls(
+        transform = cls(
             position=Vec3.from_value(data.get("position", [0.0, 0.0, 0.0])),
             rotation=Vec3.from_value(data.get("rotation", [0.0, 0.0, 0.0])),
             scale=Vec3.from_value(data.get("scale", [1.0, 1.0, 1.0])),
         )
+        quaternion_data = data.get("rotation_quaternion")
+        if isinstance(quaternion_data, (list, tuple)) and len(quaternion_data) >= 4:
+            try:
+                transform.local_quaternion = Quaternion.from_value(quaternion_data)
+            except (TypeError, ValueError):
+                transform.local_quaternion = Quaternion.identity()
+        return transform
 
 
 @dataclass(slots=True)
@@ -255,6 +299,7 @@ class Canvas(Component):
     sort_order: int = 0
     reference_resolution: Vec3 = field(default_factory=lambda: Vec3(1280.0, 720.0, 0.0))
     resolution_mode: str = "auto"
+    initial_focus: str = ""
     type_name: str = "Canvas"
 
     def to_dict(self) -> dict[str, Any]:
@@ -263,6 +308,7 @@ class Canvas(Component):
             "sort_order": self.sort_order,
             "reference_resolution": self.reference_resolution.to_list(),
             "resolution_mode": self.resolution_mode,
+            "initial_focus": self.initial_focus,
         })
         return data
 
@@ -335,6 +381,118 @@ class UIText(Component):
             "anchor": self.anchor,
             "offset": self.offset.to_list(),
             "pivot": self.pivot.to_list(),
+        })
+        return data
+
+
+@dataclass(slots=True)
+class UIControl(Component):
+    interactable: bool = True
+    navigation_up: str = ""
+    navigation_down: str = ""
+    navigation_left: str = ""
+    navigation_right: str = ""
+    normal_tint: Vec3 = field(default_factory=lambda: Vec3(1.0, 1.0, 1.0))
+    hover_tint: Vec3 = field(default_factory=lambda: Vec3(1.08, 1.08, 1.08))
+    focus_tint: Vec3 = field(default_factory=lambda: Vec3(1.12, 1.06, 0.82))
+    pressed_tint: Vec3 = field(default_factory=lambda: Vec3(0.82, 0.82, 0.82))
+    disabled_tint: Vec3 = field(default_factory=lambda: Vec3(0.45, 0.45, 0.45))
+    _runtime_hovered: bool = field(default=False, init=False, repr=False, compare=False)
+    _runtime_focused: bool = field(default=False, init=False, repr=False, compare=False)
+    _runtime_pressed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = Component.to_dict(self)
+        data.update({
+            "interactable": self.interactable,
+            "navigation_up": self.navigation_up,
+            "navigation_down": self.navigation_down,
+            "navigation_left": self.navigation_left,
+            "navigation_right": self.navigation_right,
+            "normal_tint": self.normal_tint.to_list(),
+            "hover_tint": self.hover_tint.to_list(),
+            "focus_tint": self.focus_tint.to_list(),
+            "pressed_tint": self.pressed_tint.to_list(),
+            "disabled_tint": self.disabled_tint.to_list(),
+        })
+        return data
+
+    @property
+    def visual_tint(self) -> Vec3:
+        if not self.enabled or not self.interactable:
+            return self.disabled_tint
+        if self._runtime_pressed:
+            return self.pressed_tint
+        if self._runtime_hovered:
+            return self.hover_tint
+        if self._runtime_focused:
+            return self.focus_tint
+        return self.normal_tint
+
+
+@dataclass(slots=True)
+class UIButton(UIControl):
+    type_name: str = "UIButton"
+
+
+@dataclass(slots=True)
+class UIToggle(UIControl):
+    is_on: bool = False
+    checkmark_entity: str = ""
+    type_name: str = "UIToggle"
+
+    def to_dict(self) -> dict[str, Any]:
+        data = UIControl.to_dict(self)
+        data.update({"is_on": self.is_on, "checkmark_entity": self.checkmark_entity})
+        return data
+
+
+@dataclass(slots=True)
+class UISlider(UIControl):
+    minimum: float = 0.0
+    maximum: float = 1.0
+    value: float = 0.0
+    step: float = 0.0
+    direction: str = "horizontal"
+    fill_entity: str = ""
+    handle_entity: str = ""
+    type_name: str = "UISlider"
+
+    def to_dict(self) -> dict[str, Any]:
+        data = UIControl.to_dict(self)
+        data.update({
+            "minimum": self.minimum,
+            "maximum": self.maximum,
+            "value": self.value,
+            "step": self.step,
+            "direction": self.direction,
+            "fill_entity": self.fill_entity,
+            "handle_entity": self.handle_entity,
+        })
+        return data
+
+
+@dataclass(slots=True)
+class UIScrollView(UIControl):
+    content_entity: str = ""
+    horizontal: bool = False
+    vertical: bool = True
+    wheel_speed: float = 40.0
+    drag_speed: float = 1.0
+    stick_speed: float = 360.0
+    scroll_position: Vec3 = field(default_factory=Vec3)
+    type_name: str = "UIScrollView"
+
+    def to_dict(self) -> dict[str, Any]:
+        data = UIControl.to_dict(self)
+        data.update({
+            "content_entity": self.content_entity,
+            "horizontal": self.horizontal,
+            "vertical": self.vertical,
+            "wheel_speed": self.wheel_speed,
+            "drag_speed": self.drag_speed,
+            "stick_speed": self.stick_speed,
+            "scroll_position": self.scroll_position.to_list(),
         })
         return data
 
@@ -507,27 +665,6 @@ class AudioSource(Component):
             "spatial": self.spatial,
             "min_distance": self.min_distance,
             "max_distance": self.max_distance,
-        })
-        return data
-
-
-@dataclass(slots=True)
-class Fog(Component):
-    color: Vec3 = field(default_factory=lambda: Vec3(0.46, 0.58, 0.72))
-    size: Vec3 = field(default_factory=lambda: Vec3(60.0, 30.0, 60.0))
-    near: float = 20.0
-    far: float = 120.0
-    density: float = 0.0
-    type_name: str = "Fog"
-
-    def to_dict(self) -> dict[str, Any]:
-        data = Component.to_dict(self)
-        data.update({
-            "color": self.color.to_list(),
-            "size": self.size.to_list(),
-            "near": self.near,
-            "far": self.far,
-            "density": self.density,
         })
         return data
 
@@ -767,6 +904,7 @@ def component_from_dict(data: dict[str, Any]) -> Component:
             sort_order=int(data.get("sort_order", 0)),
             reference_resolution=Vec3.from_value(data.get("reference_resolution", [1280.0, 720.0, 0.0])),
             resolution_mode=_choice(data.get("resolution_mode", "auto"), {"auto", "fixed"}, "auto"),
+            initial_focus=str(data.get("initial_focus", "")),
         )
     if kind == "UIImage":
         return UIImage(
@@ -800,6 +938,49 @@ def component_from_dict(data: dict[str, Any]) -> Component:
             anchor=str(data.get("anchor", "center")),
             offset=Vec3.from_value(data.get("offset", [0.0, 0.0, 0.0])),
             pivot=Vec3.from_value(data.get("pivot", [0.5, 0.5, 0.0])),
+        )
+    control_values = {
+        "enabled": enabled,
+        "interactable": bool(data.get("interactable", True)),
+        "navigation_up": str(data.get("navigation_up", "")),
+        "navigation_down": str(data.get("navigation_down", "")),
+        "navigation_left": str(data.get("navigation_left", "")),
+        "navigation_right": str(data.get("navigation_right", "")),
+        "normal_tint": Vec3.from_value(data.get("normal_tint", [1.0, 1.0, 1.0])),
+        "hover_tint": Vec3.from_value(data.get("hover_tint", [1.08, 1.08, 1.08])),
+        "focus_tint": Vec3.from_value(data.get("focus_tint", [1.12, 1.06, 0.82])),
+        "pressed_tint": Vec3.from_value(data.get("pressed_tint", [0.82, 0.82, 0.82])),
+        "disabled_tint": Vec3.from_value(data.get("disabled_tint", [0.45, 0.45, 0.45])),
+    }
+    if kind == "UIButton":
+        return UIButton(**control_values)
+    if kind == "UIToggle":
+        return UIToggle(
+            **control_values,
+            is_on=bool(data.get("is_on", False)),
+            checkmark_entity=str(data.get("checkmark_entity", "")),
+        )
+    if kind == "UISlider":
+        return UISlider(
+            **control_values,
+            minimum=float(data.get("minimum", 0.0)),
+            maximum=float(data.get("maximum", 1.0)),
+            value=float(data.get("value", 0.0)),
+            step=float(data.get("step", 0.0)),
+            direction=_choice(data.get("direction", "horizontal"), {"horizontal", "vertical"}, "horizontal"),
+            fill_entity=str(data.get("fill_entity", "")),
+            handle_entity=str(data.get("handle_entity", "")),
+        )
+    if kind == "UIScrollView":
+        return UIScrollView(
+            **control_values,
+            content_entity=str(data.get("content_entity", "")),
+            horizontal=bool(data.get("horizontal", False)),
+            vertical=bool(data.get("vertical", True)),
+            wheel_speed=float(data.get("wheel_speed", 40.0)),
+            drag_speed=float(data.get("drag_speed", 1.0)),
+            stick_speed=float(data.get("stick_speed", 360.0)),
+            scroll_position=Vec3.from_value(data.get("scroll_position", [0.0, 0.0, 0.0])),
         )
     if kind == "ParticleEmitter":
         emitter = ParticleEmitter(
@@ -863,14 +1044,7 @@ def component_from_dict(data: dict[str, Any]) -> Component:
             max_distance=float(data.get("max_distance", 25.0)),
         )
     if kind == "Fog":
-        return Fog(
-            enabled=enabled,
-            color=Vec3.from_value(data.get("color", [0.46, 0.58, 0.72])),
-            size=Vec3.from_value(data.get("size", [60.0, 30.0, 60.0])),
-            near=float(data.get("near", 20.0)),
-            far=float(data.get("far", 120.0)),
-            density=float(data.get("density", 0.0)),
-        )
+        return Component(enabled=enabled)
     if kind == "SpawnPoint":
         return SpawnPoint(
             enabled=enabled,

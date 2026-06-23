@@ -263,7 +263,6 @@ def create_hierarchy_mixin(
                 "ModelRenderer",
                 "Camera",
                 "Light",
-                "Fog",
                 "SpawnPoint",
                 "Collider",
                 "CharacterController",

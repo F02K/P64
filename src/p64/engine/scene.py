@@ -5,8 +5,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from p64.engine.components import AudioListener, Camera, Fog, Light, ScriptComponent
+from p64.engine.components import AudioListener, Camera, Light, ScriptComponent
 from p64.engine.entity import Entity, entity_effectively_active
+from p64.engine.lighting import clamp_lighting_settings, default_lighting_settings, lighting_path_for_scene, load_lighting_settings, save_lighting_settings
 from p64.engine.render_settings import clamp_render_settings, default_render_settings
 
 
@@ -15,6 +16,7 @@ class Scene:
     name: str
     entities: list[Entity] = field(default_factory=list)
     render_settings: dict[str, Any] = field(default_factory=dict)
+    lighting_settings: dict[str, Any] = field(default_factory=default_lighting_settings)
 
     def add_entity(self, entity: Entity) -> Entity:
         self.entities.append(entity)
@@ -78,17 +80,6 @@ class Scene:
             if isinstance(component, Light) and component.enabled
         ]
 
-    def fog(self) -> Fog | None:
-        volume = self.fog_volume()
-        return volume[1] if volume else None
-
-    def fog_volume(self) -> tuple[Entity, Fog] | None:
-        for entity in self.walk_active():
-            for component in entity.components:
-                if isinstance(component, Fog) and component.enabled:
-                    return entity, component
-        return None
-
     def script_components(self) -> list[tuple[Entity, ScriptComponent]]:
         return [
             (entity, component)
@@ -100,28 +91,40 @@ class Scene:
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "render_settings": self.render_settings,
             "entities": [entity.to_dict() for entity in self.entities],
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Scene":
-        return cls(
+        legacy_lighting = dict(data.get("render_settings", {}))
+        if "fog" in legacy_lighting and "fog_enabled" not in legacy_lighting:
+            legacy_lighting["fog_enabled"] = legacy_lighting["fog"]
+        scene = cls(
             name=str(data.get("name", "Scene")),
-            render_settings=clamp_render_settings({**default_render_settings(), **dict(data.get("render_settings", {}))}),
-            entities=[Entity.from_dict(item) for item in data.get("entities", [])],
+            render_settings={},
+            lighting_settings=clamp_lighting_settings({**default_lighting_settings(), **legacy_lighting}),
+            entities=[Entity.from_dict(_without_legacy_fog(item)) for item in data.get("entities", [])],
         )
+        _remove_legacy_fog_components(scene.entities)
+        return scene
 
     @classmethod
     def load(cls, path: Path) -> "Scene":
         with path.open("r", encoding="utf-8") as handle:
-            return cls.from_dict(json.load(handle))
+            data = json.load(handle)
+        scene = cls.from_dict(data)
+        lighting_path = lighting_path_for_scene(path)
+        scene.lighting_settings = load_lighting_settings(lighting_path, dict(data.get("render_settings", {})))
+        if not lighting_path.exists():
+            save_lighting_settings(lighting_path, scene.lighting_settings)
+        return scene
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
             json.dump(self.to_dict(), handle, indent=2)
             handle.write("\n")
+        save_lighting_settings(lighting_path_for_scene(path), self.lighting_settings)
 
     def run_scripts_once(self, project_root: Path, dt: float = 1 / 60, scene_manager: object | None = None) -> list[str]:
         from p64.engine.project import Project
@@ -133,3 +136,24 @@ class Scene:
             session.scene_manager = scene_manager
             session.scene_manager.current_scene = self
         return session.tick(dt)
+
+
+def _remove_legacy_fog_components(entities: list[Entity]) -> None:
+    for entity in entities:
+        entity.components = [component for component in entity.components if component.type_name != "Fog"]
+        _remove_legacy_fog_components(entity.children)
+
+
+def _without_legacy_fog(data: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(data)
+    cleaned["components"] = [
+        component
+        for component in data.get("components", [])
+        if not isinstance(component, dict) or component.get("type") != "Fog"
+    ]
+    cleaned["children"] = [
+        _without_legacy_fog(child)
+        for child in data.get("children", [])
+        if isinstance(child, dict)
+    ]
+    return cleaned

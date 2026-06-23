@@ -60,6 +60,23 @@ object's local rotation.
 `self.transform.scene_object` returns the entity that owns the transform.
 `self.transform.sceneObject` is also available as a Unity-style alias.
 
+Rotations are stored internally as normalized quaternions. The existing
+`self.transform.rotation` field remains a live Euler-angle view in degrees, so
+existing code such as `self.transform.rotation.y += 90` remains valid.
+
+For quaternion-native rotation use:
+
+```python
+from p64.engine.math import Quaternion, Vec3
+
+self.transform.local_quaternion = Quaternion.angle_axis(90, Vec3.up())
+world_orientation = self.transform.world_quaternion
+```
+
+`Quaternion` also provides `from_euler`, `to_euler`, `look_rotation`, `inverse`,
+`lerp`, and `slerp`. Parent and child orientations are combined using
+quaternion multiplication.
+
 ## Rotate An Object
 
 ```python
@@ -135,6 +152,51 @@ class ControllerMove(GameScript):
 
 Additional controllers are prefixed, for example `"controller1_left_x"`.
 
+## Interactive UI
+
+UI controls use `Canvas` and `RectTransform` for their screen-space bounds. Add
+one interactive component to a UI entity:
+
+- `UIButton`
+- `UIToggle`
+- `UISlider`
+- `UIScrollView`
+
+Mouse, keyboard, and controller input are handled automatically. Arrow keys,
+WASD, the D-pad, and the left stick move focus. Enter, Space, or the controller
+South button submit the focused control. Escape or controller East cancel it.
+
+Attach a script to the same entity and implement only the callbacks it needs:
+
+```python
+from p64.engine.scripting import GameScript
+
+
+class MainMenuButton(GameScript):
+    def on_ui_focus(self):
+        pass
+
+    def on_ui_click(self):
+        self.scene_manager.load_scene_by_name("main")
+
+    def on_ui_cancel(self):
+        pass
+```
+
+Toggle and Slider controls call `on_ui_value_changed(value)`. ScrollView calls
+`on_ui_scroll_changed(x, y)`. Pointer transitions call
+`on_ui_pointer_enter()` and `on_ui_pointer_exit()`, while controller or keyboard
+focus calls `on_ui_focus()` and `on_ui_blur()`.
+
+Every `GameScript` also receives `self.ui_control` plus the matching typed
+shortcut: `self.ui_button`, `self.ui_toggle`, `self.ui_slider`, or
+`self.ui_scroll_view`.
+
+Navigation is selected geometrically by default. Inspector references can
+override Up, Down, Left, and Right. A Canvas can provide an Initial Focus entity.
+ScrollView content is clipped to the view rectangle and can be moved with the
+wheel, pointer drag, or right stick.
+
 ## Entity Physics
 
 Add an `EntityPhysics` component to the same entity, then use
@@ -187,6 +249,35 @@ class PlayerController(GameScript):
 ```
 
 `move_character` returns the collision-adjusted motion as a `Vec3`.
+
+## Raycasts
+
+Gameplay raycasts test enabled Colliders on active entities. Renderer geometry
+without a Collider is not included.
+
+```python
+from p64.engine.math import Vec3
+from p64.engine.scripting import GameScript
+
+
+class LookForWall(GameScript):
+    def on_update(self, dt):
+        hit = self.raycast(
+            self.transform.world_position,
+            self.transform.forward,
+            max_distance=20.0,
+            layer_mask="World",
+        )
+        if hit:
+            print(hit.entity.name, hit.point, hit.normal, hit.distance)
+```
+
+`self.raycast` returns the nearest `RaycastHit` or `None`.
+`self.raycast_all` returns all hits sorted by distance. Both support
+`layer_mask`, `include_triggers`, and `ignore_entity`. Script shortcuts ignore
+the script's own entity and its children by default. Use
+`self.collision_world.raycast(...)` directly when no implicit ignore target is
+wanted.
 
 ## Audio Playback
 

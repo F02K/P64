@@ -10,6 +10,7 @@ from p64.engine.scene import Scene
 class UndoState:
     label: str
     scene_data: dict[str, Any]
+    lighting_settings: dict[str, Any]
     selection_id: str | None
 
 
@@ -96,4 +97,9 @@ class UndoManager:
         return self._states[self._index]
 
     def _state(self, label: str, scene: Scene, selection_id: str | None) -> UndoState:
-        return UndoState(label=label, scene_data=scene.to_dict(), selection_id=selection_id)
+        return UndoState(
+            label=label,
+            scene_data=scene.to_dict(),
+            lighting_settings=dict(scene.lighting_settings),
+            selection_id=selection_id,
+        )

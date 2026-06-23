@@ -5,7 +5,7 @@ from pathlib import Path
 
 from p64.engine.assets import AssetMetadata, discover_metadata, model_info, resolve_model_mesh
 from p64.engine.audio import audio_info, resolve_audio_clip
-from p64.engine.components import AudioSource, CharacterController, Collider, EntityPhysics, MeshRenderer, ModelRenderer, ParticleEmitter, ScriptComponent
+from p64.engine.components import AudioSource, Canvas, CharacterController, Collider, EntityPhysics, MeshRenderer, ModelRenderer, ParticleEmitter, ScriptComponent, UIControl, UIScrollView, UISlider, UIToggle
 from p64.engine.entity import Entity
 from p64.engine.material import resolve_material_reference
 from p64.engine.project import Project
@@ -36,6 +36,15 @@ def scene_reference_errors(project: Project, scene: Scene) -> dict[str, list[str
 def entity_reference_errors(project: Project, entity: Entity, metadata: dict[str, AssetMetadata] | None = None) -> list[str]:
     metadata = metadata or asset_metadata_by_id(project)
     errors: list[str] = []
+    controls = [component for component in entity.components if isinstance(component, UIControl)]
+    if len(controls) > 1:
+        errors.append("An entity can only have one interactive UI control")
+    root = entity
+    while root.parent is not None:
+        root = root.parent
+    entities_by_id = {candidate.id: candidate for candidate in root.walk()}
+    entity_ids = set(entities_by_id)
+    descendant_ids = {candidate.id for child in entity.children for candidate in child.walk()}
     for child in entity.children:
         if child.object_type != entity.object_type:
             errors.append("Child SceneObject type must match parent")
@@ -138,6 +147,44 @@ def entity_reference_errors(project: Project, entity: Entity, metadata: dict[str
                 errors.append("EntityPhysics requires an Entity")
         if isinstance(component, ParticleEmitter) and not entity.is_entity:
             errors.append("ParticleEmitter requires an Entity")
+        if isinstance(component, Canvas) and component.initial_focus and component.initial_focus not in entity_ids:
+            errors.append(f"Missing UI entity reference: {component.initial_focus}")
+        elif isinstance(component, Canvas) and component.initial_focus:
+            target = entities_by_id[component.initial_focus]
+            if not any(isinstance(candidate, UIControl) for candidate in target.components):
+                errors.append(f"UI navigation target has no control: {component.initial_focus}")
+        if isinstance(component, UIControl):
+            for reference in (
+                component.navigation_up,
+                component.navigation_down,
+                component.navigation_left,
+                component.navigation_right,
+            ):
+                if reference and reference not in entity_ids:
+                    errors.append(f"Missing UI entity reference: {reference}")
+                elif reference and not any(isinstance(candidate, UIControl) for candidate in entities_by_id[reference].components):
+                    errors.append(f"UI navigation target has no control: {reference}")
+        if isinstance(component, UIToggle) and component.checkmark_entity and component.checkmark_entity not in entity_ids:
+            errors.append(f"Missing UI entity reference: {component.checkmark_entity}")
+        elif isinstance(component, UIToggle) and component.checkmark_entity and component.checkmark_entity not in descendant_ids:
+            errors.append("UIToggle checkmark must reference a child entity")
+        if isinstance(component, UISlider):
+            if component.maximum <= component.minimum:
+                errors.append("UISlider maximum must be greater than minimum")
+            if component.step < 0:
+                errors.append("UISlider step must be non-negative")
+            for reference in (component.fill_entity, component.handle_entity):
+                if reference and reference not in entity_ids:
+                    errors.append(f"Missing UI entity reference: {reference}")
+                elif reference and reference not in descendant_ids:
+                    errors.append("UISlider visuals must reference child entities")
+        if isinstance(component, UIScrollView):
+            if component.content_entity and component.content_entity not in entity_ids:
+                errors.append(f"Missing UI entity reference: {component.content_entity}")
+            elif component.content_entity and component.content_entity not in descendant_ids:
+                errors.append("UIScrollView content must reference a child entity")
+            if component.wheel_speed < 0 or component.drag_speed < 0 or component.stick_speed < 0:
+                errors.append("UIScrollView speeds must be non-negative")
     return errors
 
 

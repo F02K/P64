@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from p64.engine.builtin import BUILTIN_PACKAGE_NAME, ensure_builtin_package
-from p64.engine.components import Camera, Fog, Light
+from p64.engine.components import Camera, Light
 from p64.engine.entity import Entity
 from p64.engine.files import DEFAULT_SCENE, LEGACY_DEFAULT_SCENE, PROJECT_FILE, alternate_scene_path, normalize_scene_path, project_file_for, project_root_from_path
 from p64.engine.math import Vec3
@@ -118,14 +118,12 @@ class Project:
                 "texture_filter": "three_point",
                 "color_levels": 32,
                 "dithering": True,
-                "fog": True,
             },
             build_settings=default_build_settings(name or root.name),
             editor_settings=default_editor_settings(),
         )
         project.ensure_layout()
         scene = default_scene("main")
-        scene.render_settings = dict(project.render_settings)
         scene.save(root / project.startup_scene)
         project.save()
         setup_vscode_project(project)
@@ -244,9 +242,6 @@ def default_scene(name: str) -> Scene:
     sun.add_component(Light(kind="directional", intensity=1.25))
     scene.add_entity(sun)
 
-    fog = Entity("Fog")
-    fog.add_component(Fog(near=18.0, far=85.0))
-    scene.add_entity(fog)
     return scene
 
 

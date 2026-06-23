@@ -7,6 +7,7 @@ PROJECT_FILE = "project.p64"
 LEGACY_PROJECT_FILE = "project.p64.json"
 
 SCENE_SUFFIX = ".scenep64"
+LIGHTING_SUFFIX = ".lightingp64"
 LEGACY_SCENE_SUFFIX = ".p64scene.json"
 DEFAULT_SCENE = f"assets/scenes/main{SCENE_SUFFIX}"
 LEGACY_DEFAULT_SCENE = f"scenes/main{LEGACY_SCENE_SUFFIX}"
@@ -38,6 +39,10 @@ def project_root_from_path(path: Path) -> Path:
 def is_project_root(path: Path) -> bool:
     root = project_root_from_path(path)
     return (root / PROJECT_FILE).exists() or (root / LEGACY_PROJECT_FILE).exists()
+
+
+def is_lighting_file(path: Path) -> bool:
+    return path.suffix.lower() == LIGHTING_SUFFIX
 
 
 def normalize_scene_path(path: str) -> str:

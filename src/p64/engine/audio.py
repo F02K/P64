@@ -15,7 +15,7 @@ from p64.engine.files import find_metadata_for_source, metadata_path_for_source
 from p64.engine.math import Vec3
 from p64.engine.project import Project
 from p64.engine.scene import Scene
-from p64.engine.transforms import world_position as transform_world_position, world_rotation as transform_world_rotation
+from p64.engine.transforms import world_position as transform_world_position, world_quaternion as transform_world_quaternion, world_rotation as transform_world_rotation
 
 
 MAX_AUDIO_SAMPLE_RATE = 22050
@@ -323,17 +323,17 @@ class AudioSystem:
     def channel_count(self) -> int:
         return len(self._channels)
 
-    def _listener_pose(self) -> tuple[Vec3, Vec3] | None:
+    def _listener_pose(self) -> tuple[Vec3, Any] | None:
         for entity in self._listener_entities:
             if not entity_effectively_active(entity):
                 continue
             for component in entity.components:
                 if isinstance(component, AudioListener) and component.enabled and component.active:
-                    return _world_position(entity), _world_rotation(entity)
+                    return _world_position(entity), transform_world_quaternion(entity)
         return None
 
 
-def spatial_gains(source: AudioSource, position: Vec3, listener: Vec3 | None = None, listener_rotation: Vec3 | None = None) -> tuple[float, float]:
+def spatial_gains(source: AudioSource, position: Vec3, listener: Vec3 | None = None, listener_rotation: Vec3 | Any | None = None) -> tuple[float, float]:
     volume = max(0.0, min(1.0, float(source.volume)))
     if not source.spatial:
         return volume, volume
@@ -498,18 +498,21 @@ def _write_mono_wav(path: Path, samples: list[int], sample_rate: int) -> None:
         handle.writeframes(struct.pack(f"<{len(samples)}h", *samples))
 
 
-def _listener_pose(scene: Scene | None) -> tuple[Vec3, Vec3] | None:
+def _listener_pose(scene: Scene | None) -> tuple[Vec3, Any] | None:
     if scene is None:
         return None
     listener = scene.active_audio_listener()
     if listener is None:
         return None
-    return _world_position(listener), _world_rotation(listener)
+    return _world_position(listener), transform_world_quaternion(listener)
 
 
-def _listener_right(rotation: Vec3) -> tuple[float, float]:
-    yaw = math.radians(rotation.y)
-    return math.cos(yaw), math.sin(yaw)
+def _listener_right(rotation: Any) -> tuple[float, float]:
+    from p64.engine.math import Quaternion
+
+    quaternion = rotation if isinstance(rotation, Quaternion) else Quaternion.from_euler(rotation)
+    right = quaternion * Vec3.right()
+    return (right.x, right.z) if isinstance(right, Vec3) else (1.0, 0.0)
 
 
 def _world_position(entity: Any | None) -> Vec3:

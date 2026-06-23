@@ -11,9 +11,10 @@ from p64.engine.audio import import_audio_clip
 from p64.engine.assets import AssetMetadata, model_meshes
 from p64.engine.builtin import PARTICLE_MATERIAL_RELATIVE, SPRITE_MATERIAL_RELATIVE, UI_IMAGE_MATERIAL_RELATIVE
 from p64.engine.collision import apply_mesh_primitive_defaults
-from p64.engine.components import AudioListener, AudioSource, Camera, Canvas, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ModelRenderer, ParticleEmitter, RectTransform, ScriptComponent, SpawnPoint, SpriteRenderer, UIImage, UIText
+from p64.engine.components import AudioListener, AudioSource, Camera, Canvas, CharacterController, Collider, EntityPhysics, Light, MeshRenderer, ModelRenderer, ParticleEmitter, RectTransform, ScriptComponent, SpawnPoint, SpriteRenderer, UIButton, UIControl, UIImage, UIScrollView, UISlider, UIText, UIToggle
 from p64.engine.entity import ENTITY, GAME_OBJECT, Entity, entity_under_canvas
-from p64.engine.files import find_metadata_for_source, is_metadata_file, iter_metadata_files, metadata_path_for_source
+from p64.engine.files import find_metadata_for_source, is_lighting_file, is_metadata_file, is_scene_file, iter_metadata_files, metadata_path_for_source
+from p64.engine.lighting import lighting_path_for_scene
 from p64.engine.material import (
     create_material_from_defaults,
     material_asset_id,
@@ -224,6 +225,8 @@ def create_blank_asset_file(project: Project, parent: Path, name: str = "new_fil
 
 def rename_asset_path(project: Project, path: Path, new_name: str) -> Path:
     source = _editable_asset_path(project, path)
+    if is_lighting_file(source):
+        raise AssetOperationError("Lighting assets are renamed together with their Scene")
     name = _validate_asset_name(new_name)
     destination = source.with_name(name)
     if destination == source:
@@ -231,10 +234,17 @@ def rename_asset_path(project: Project, path: Path, new_name: str) -> Path:
     _ensure_under_assets(project, destination)
     if destination.exists():
         raise AssetOperationError(f"Asset already exists: {destination.name}")
+    if is_scene_file(source) and lighting_path_for_scene(destination).exists():
+        raise AssetOperationError(f"Lighting asset already exists: {lighting_path_for_scene(destination).name}")
     old_relative = _relative_to_project(project, source)
     new_relative = _relative_to_project(project, destination)
     was_dir = source.is_dir()
     source.rename(destination)
+    if is_scene_file(destination):
+        old_lighting = lighting_path_for_scene(source)
+        new_lighting = lighting_path_for_scene(destination)
+        if old_lighting.exists():
+            old_lighting.rename(new_lighting)
     if was_dir:
         _update_metadata_sources_after_folder_rename(project, destination, old_relative, new_relative)
     elif not is_metadata_file(destination):
@@ -244,10 +254,16 @@ def rename_asset_path(project: Project, path: Path, new_name: str) -> Path:
 
 def delete_asset_path(project: Project, path: Path) -> None:
     source = _editable_asset_path(project, path)
+    if is_lighting_file(source):
+        raise AssetOperationError("Lighting assets are deleted together with their Scene")
     if source.is_dir():
         shutil.rmtree(source)
         return
     source.unlink()
+    if is_scene_file(source):
+        lighting = lighting_path_for_scene(source)
+        if lighting.exists():
+            lighting.unlink()
     if not is_metadata_file(source):
         metadata = find_metadata_for_source(source)
         if metadata and asset_path_is_editable(project, metadata):
@@ -268,6 +284,21 @@ def update_startup_scene_after_asset_rename(project: Project, old_path: Path, ne
     project.startup_scene = project_relative_asset_path(project, new_path)
     project.save()
     return True
+
+
+def duplicate_scene_asset(project: Project, source: Path) -> tuple[Path, Path]:
+    source = _editable_asset_path(project, source)
+    if not is_scene_file(source):
+        raise AssetOperationError("Only Scene assets can be duplicated")
+    destination = _unique_path(source.with_name(f"{source.stem}_copy{source.suffix}"))
+    shutil.copy2(source, destination)
+    source_lighting = lighting_path_for_scene(source)
+    destination_lighting = lighting_path_for_scene(destination)
+    if source_lighting.exists():
+        shutil.copy2(source_lighting, destination_lighting)
+    else:
+        Scene.load(source).save(destination)
+    return destination, destination_lighting
 
 
 def create_shader_template(assets_dir: Path, name: str = "new_shader") -> Path:
@@ -345,6 +376,8 @@ def open_script_in_vscode_project(project: Project, script_path: Path, fallback_
 
 
 def add_component(entity: Entity, component_name: str, project: Project | None = None) -> object:
+    if component_name in {"UIButton", "UIToggle", "UISlider", "UIScrollView"} and any(isinstance(component, UIControl) for component in entity.components):
+        raise ValueError("An entity can only have one interactive UI control")
     if component_name == "MeshRenderer":
         return entity.add_component(MeshRenderer())
     if component_name == "ModelRenderer":
@@ -359,6 +392,18 @@ def add_component(entity: Entity, component_name: str, project: Project | None =
     if component_name == "UIText":
         _ensure_ui_rect_transform(entity, Vec3(240.0, 40.0, 0.0))
         return entity.add_component(UIText())
+    if component_name == "UIButton":
+        _ensure_ui_rect_transform(entity)
+        return entity.add_component(UIButton())
+    if component_name == "UIToggle":
+        _ensure_ui_rect_transform(entity)
+        return entity.add_component(UIToggle())
+    if component_name == "UISlider":
+        _ensure_ui_rect_transform(entity, Vec3(240.0, 32.0, 0.0))
+        return entity.add_component(UISlider())
+    if component_name == "UIScrollView":
+        _ensure_ui_rect_transform(entity, Vec3(320.0, 240.0, 0.0))
+        return entity.add_component(UIScrollView())
     if component_name == "ParticleEmitter":
         entity.object_type = ENTITY
         return entity.add_component(ParticleEmitter(material=PARTICLE_MATERIAL_RELATIVE))
@@ -370,8 +415,6 @@ def add_component(entity: Entity, component_name: str, project: Project | None =
         return entity.add_component(AudioSource())
     if component_name == "AudioListener":
         return entity.add_component(AudioListener())
-    if component_name == "Fog":
-        return entity.add_component(Fog())
     if component_name == "ScriptComponent":
         entity.object_type = ENTITY
         return entity.add_component(ScriptComponent())

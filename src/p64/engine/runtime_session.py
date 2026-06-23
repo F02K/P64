@@ -12,6 +12,7 @@ from p64.engine.collision import CollisionWorld
 from p64.engine.entity import entity_effectively_active
 from p64.engine.input import InputState
 from p64.engine.scripting import ScriptContext, ScriptManager
+from p64.engine.ui import UIEventSystem
 
 
 MAX_PHYSICS_DT = 0.05
@@ -39,6 +40,7 @@ class RuntimeSession:
             import_dirs=[project.project_api_dir],
         )
         self.input = InputState()
+        self.ui = UIEventSystem(self._dispatch_ui_callback)
         self.audio = AudioSystem(project, logger=self._record_runtime_error)
         self.time = 0.0
         self._scripts: list[RuntimeScript] = []
@@ -62,6 +64,7 @@ class RuntimeSession:
     def stop(self) -> None:
         self.audio.stop_all()
         self._scripts = []
+        self.ui.reset(self.scene)
         self._started = False
 
     def tick(self, dt: float) -> list[str]:
@@ -73,6 +76,8 @@ class RuntimeSession:
         try:
             with _profiler_section(profiler, "runtime total"):
                 self.time += dt
+                with _profiler_section(profiler, "runtime ui"):
+                    errors.extend(self.ui.process(self.scene, self.input, dt))
                 _profiler_add_count(profiler, "runtime scripts", len(self._scripts))
                 with _profiler_section(profiler, "runtime scripts"):
                     for runtime_script in list(self._scripts):
@@ -80,6 +85,7 @@ class RuntimeSession:
                         instance.scene = self.scene
                         instance.project = self.project
                         instance.scene_manager = self.scene_manager
+                        instance.collision_world = self.collision_world
                         instance.input = self.input
                         instance.time = self.time
                         if not entity_effectively_active(instance.entity):
@@ -96,6 +102,7 @@ class RuntimeSession:
                 with _profiler_section(profiler, "runtime scene switch"):
                     if self.scene_manager.apply_queued_scene():
                         self.audio.stop_all()
+                        self.ui.reset()
                         self.collision_world = CollisionWorld(self.scene, self.project)
                         self.audio.start_scene(self.scene)
                         errors.extend(self._drain_pending_errors())
@@ -136,6 +143,18 @@ class RuntimeSession:
                     except Exception as exc:  # pragma: no cover - exact user code is unknowable
                         errors.append(f"{entry_name}.on_start failed: {exc}")
                 self._scripts.append(RuntimeScript(entry_name=entry_name, instance=instance))
+        return errors
+
+    def _dispatch_ui_callback(self, entity: Any, method: str, args: tuple[Any, ...]) -> list[str]:
+        errors: list[str] = []
+        for runtime_script in self._scripts:
+            instance = runtime_script.instance
+            if instance.entity is not entity or not hasattr(instance, method):
+                continue
+            try:
+                getattr(instance, method)(*args)
+            except Exception as exc:  # pragma: no cover - exact user code is unknowable
+                errors.append(f"{runtime_script.entry_name}.{method} failed: {exc}")
         return errors
 
     def _record_runtime_error(self, message: str) -> None:

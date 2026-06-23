@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import floor, sqrt
+from math import floor, inf, sqrt
 from typing import Any
 
 from p64.engine.components import CharacterController, Collider, EntityPhysics
 from p64.engine.entity import Entity, entity_effectively_active
-from p64.engine.math import Vec3
+from p64.engine.math import Quaternion, Vec3
 from p64.engine.mesh_geometry import bounds_from_points, convex_hull, ensure_mesh_collision_metadata, mesh_bounds, render_geometry_for, mesh_triangles, transform_point, transform_triangle, transformed_bounds
 from p64.engine.transforms import world_position
+from p64.engine.transforms import _inverse_affine, transform_direction
 
 
 @dataclass(slots=True)
@@ -17,6 +18,16 @@ class CollisionHit:
     collider: Collider
     normal: Vec3
     depth: float
+    is_trigger: bool = False
+
+
+@dataclass(slots=True)
+class RaycastHit:
+    entity: Entity
+    collider: Collider
+    point: Vec3
+    normal: Vec3
+    distance: float
     is_trigger: bool = False
 
 
@@ -138,6 +149,50 @@ class CollisionWorld:
             hits.append(CollisionHit(other_entity, other, normal, depth, other.is_trigger))
         return hits
 
+    def raycast(
+        self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: float = inf,
+        layer_mask: str = "*",
+        include_triggers: bool = False,
+        ignore_entity: Entity | None = None,
+    ) -> RaycastHit | None:
+        hits = self.raycast_all(origin, direction, max_distance, layer_mask, include_triggers, ignore_entity)
+        return hits[0] if hits else None
+
+    def raycast_all(
+        self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: float = inf,
+        layer_mask: str = "*",
+        include_triggers: bool = False,
+        ignore_entity: Entity | None = None,
+    ) -> list[RaycastHit]:
+        if max_distance <= 0.0:
+            return []
+        normalized_direction = direction.normalized()
+        if normalized_direction.length_squared() <= 0.000001:
+            return []
+        self._rebuild_dynamic_frame_cache()
+        hits: list[tuple[int, RaycastHit]] = []
+        for order, proxy in enumerate([*self._static_proxies, *self._dynamic_proxies]):
+            entity, collider = proxy.entity, proxy.collider
+            if collider.is_trigger and not include_triggers:
+                continue
+            if not _mask_allows(layer_mask, collider.layer):
+                continue
+            if ignore_entity is not None and _entity_is_or_descends_from(entity, ignore_entity):
+                continue
+            if _ray_bounds_intersection(origin, normalized_direction, proxy.bounds, max_distance) is None:
+                continue
+            hit = _raycast_collider(origin, normalized_direction, max_distance, entity, collider, self.project)
+            if hit is not None:
+                hits.append((order, hit))
+        hits.sort(key=lambda item: (item[1].distance, item[0]))
+        return [hit for _order, hit in hits]
+
     def ground_check(self, entity: Entity, controller: CharacterController, distance: float | None = None) -> CollisionHit | None:
         self._ensure_frame_cache()
         distance = controller.skin_width + 0.08 if distance is None else distance
@@ -256,9 +311,10 @@ class CollisionWorld:
             physics.angular_velocity.z * dt,
         )
         self._apply_freeze(physics.angular_velocity, rotation_delta, physics.freeze_rotation)
-        entity.transform.rotation.x += rotation_delta.x
-        entity.transform.rotation.y += rotation_delta.y
-        entity.transform.rotation.z += rotation_delta.z
+        delta_quaternion = Quaternion.from_euler(rotation_delta)
+        integrated = entity.transform.local_quaternion * delta_quaternion
+        if isinstance(integrated, Quaternion):
+            entity.transform.local_quaternion = integrated.normalized()
         physics.clear_accumulators()
 
     def _apply_freeze(self, velocity: Vec3, delta: Vec3, freeze: Vec3) -> None:
@@ -466,6 +522,194 @@ def collider_sphere(entity: Entity, collider: Collider, project: Any | None = No
     )
     world_radius = max(_length(_sub(transform_point(matrix, point), center)) for point in offsets)
     return center, max(world_radius, 0.001)
+
+
+def ray_triangle_intersection(origin: Vec3, direction: Vec3, triangle: tuple[Vec3, Vec3, Vec3]) -> tuple[float, Vec3] | None:
+    epsilon = 0.000001
+    v0, v1, v2 = triangle
+    edge1 = _sub(v1, v0)
+    edge2 = _sub(v2, v0)
+    h = _cross(direction, edge2)
+    determinant = _dot(edge1, h)
+    if -epsilon < determinant < epsilon:
+        return None
+    inverse = 1.0 / determinant
+    s = _sub(origin, v0)
+    u = inverse * _dot(s, h)
+    if u < 0.0 or u > 1.0:
+        return None
+    q = _cross(s, edge1)
+    v = inverse * _dot(direction, q)
+    if v < 0.0 or u + v > 1.0:
+        return None
+    distance = inverse * _dot(edge2, q)
+    if distance < 0.0:
+        return None
+    normal = _normalize(_cross(edge1, edge2))
+    if _dot(normal, direction) > 0.0:
+        normal = -normal
+    return distance, normal
+
+
+def _raycast_collider(
+    origin: Vec3,
+    direction: Vec3,
+    max_distance: float,
+    entity: Entity,
+    collider: Collider,
+    project: Any | None,
+) -> RaycastHit | None:
+    result: tuple[float, Vec3] | None
+    if collider.shape == "sphere":
+        result = _ray_sphere_intersection(origin, direction, *collider_sphere(entity, collider, project))
+    elif collider.shape == "mesh":
+        result = _ray_mesh_intersection(origin, direction, entity, collider, project)
+    else:
+        result = _ray_box_intersection(origin, direction, entity, collider, project)
+    if result is None or result[0] > max_distance:
+        return None
+    distance, normal = result
+    point = Vec3(
+        origin.x + direction.x * distance,
+        origin.y + direction.y * distance,
+        origin.z + direction.z * distance,
+    )
+    return RaycastHit(entity, collider, point, normal, distance, collider.is_trigger)
+
+
+def _ray_sphere_intersection(origin: Vec3, direction: Vec3, center: Vec3, radius: float) -> tuple[float, Vec3] | None:
+    offset = _sub(origin, center)
+    b = _dot(offset, direction)
+    c = _dot(offset, offset) - radius * radius
+    discriminant = b * b - c
+    if discriminant < 0.0:
+        return None
+    root = sqrt(discriminant)
+    near, far = -b - root, -b + root
+    distance = near if near >= 0.0 else far
+    if distance < 0.0:
+        return None
+    point = Vec3(origin.x + direction.x * distance, origin.y + direction.y * distance, origin.z + direction.z * distance)
+    return distance, _normalize(_sub(point, center))
+
+
+def _ray_box_intersection(
+    origin: Vec3,
+    direction: Vec3,
+    entity: Entity,
+    collider: Collider,
+    project: Any | None,
+) -> tuple[float, Vec3] | None:
+    matrix = entity.transform.world_matrix(entity)
+    inverse = _inverse_affine(matrix)
+    local_origin = transform_point(inverse, origin)
+    local_direction = _transform_direction_raw(inverse, direction)
+    local_min: Vec3
+    local_max: Vec3
+    if project is not None and collider.fit_to_mesh:
+        fitted = mesh_bounds(project, render_geometry_for(entity))
+        if fitted is not None:
+            local_min, local_max = fitted
+        else:
+            local_min, local_max = _local_box_bounds(collider)
+    else:
+        local_min, local_max = _local_box_bounds(collider)
+    slab = _ray_local_bounds(local_origin, local_direction, local_min, local_max)
+    if slab is None:
+        return None
+    distance, local_normal = slab
+    world_normal = transform_direction(matrix, local_normal)
+    return distance, world_normal
+
+
+def _ray_mesh_intersection(
+    origin: Vec3,
+    direction: Vec3,
+    entity: Entity,
+    collider: Collider,
+    project: Any | None,
+) -> tuple[float, Vec3] | None:
+    if project is None:
+        return None
+    renderer = render_geometry_for(entity)
+    if renderer is None:
+        return None
+    if collider.convex:
+        hull = convex_hull(project, renderer)
+        triangles = hull.triangles if hull is not None else ()
+    else:
+        triangles = mesh_triangles(project, renderer)
+    matrix = entity.transform.world_matrix(entity)
+    best: tuple[float, Vec3] | None = None
+    for triangle in triangles:
+        hit = ray_triangle_intersection(origin, direction, transform_triangle(matrix, triangle))
+        if hit is not None and (best is None or hit[0] < best[0]):
+            best = hit
+    return best
+
+
+def _local_box_bounds(collider: Collider) -> tuple[Vec3, Vec3]:
+    half = Vec3(abs(collider.size.x) * 0.5, abs(collider.size.y) * 0.5, abs(collider.size.z) * 0.5)
+    return (
+        Vec3(collider.center.x - half.x, collider.center.y - half.y, collider.center.z - half.z),
+        Vec3(collider.center.x + half.x, collider.center.y + half.y, collider.center.z + half.z),
+    )
+
+
+def _ray_bounds_intersection(origin: Vec3, direction: Vec3, bounds: Bounds, max_distance: float) -> float | None:
+    result = _ray_local_bounds(origin, direction, bounds.min, bounds.max)
+    if result is None or result[0] > max_distance:
+        return None
+    return result[0]
+
+
+def _ray_local_bounds(origin: Vec3, direction: Vec3, minimum: Vec3, maximum: Vec3) -> tuple[float, Vec3] | None:
+    near, far = -inf, inf
+    near_normal, far_normal = Vec3(), Vec3()
+    for axis, negative, positive in (
+        ("x", Vec3(-1.0, 0.0, 0.0), Vec3(1.0, 0.0, 0.0)),
+        ("y", Vec3(0.0, -1.0, 0.0), Vec3(0.0, 1.0, 0.0)),
+        ("z", Vec3(0.0, 0.0, -1.0), Vec3(0.0, 0.0, 1.0)),
+    ):
+        origin_value = getattr(origin, axis)
+        direction_value = getattr(direction, axis)
+        min_value, max_value = getattr(minimum, axis), getattr(maximum, axis)
+        if abs(direction_value) <= 0.000001:
+            if origin_value < min_value or origin_value > max_value:
+                return None
+            continue
+        first = (min_value - origin_value) / direction_value
+        second = (max_value - origin_value) / direction_value
+        first_normal, second_normal = negative, positive
+        if first > second:
+            first, second = second, first
+            first_normal, second_normal = second_normal, first_normal
+        if first > near:
+            near, near_normal = first, first_normal
+        if second < far:
+            far, far_normal = second, second_normal
+        if near > far:
+            return None
+    if far < 0.0:
+        return None
+    return (near, near_normal) if near >= 0.0 else (far, far_normal)
+
+
+def _transform_direction_raw(matrix: list[float], direction: Vec3) -> Vec3:
+    return Vec3(
+        matrix[0] * direction.x + matrix[1] * direction.y + matrix[2] * direction.z,
+        matrix[4] * direction.x + matrix[5] * direction.y + matrix[6] * direction.z,
+        matrix[8] * direction.x + matrix[9] * direction.y + matrix[10] * direction.z,
+    )
+
+
+def _entity_is_or_descends_from(entity: Entity, parent: Entity) -> bool:
+    current: Entity | None = entity
+    while current is not None:
+        if current is parent:
+            return True
+        current = current.parent
+    return False
 
 
 def apply_mesh_primitive_defaults(project: Any | None, entity: Entity, collider: Collider, shape: str | None = None) -> bool:

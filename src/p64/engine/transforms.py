@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from p64.engine.math import Mat4, Vec3, identity
+from p64.engine.math import Mat4, Quaternion, Vec3, identity
 
 
 def world_matrix(entity: Any | None) -> Mat4:
@@ -22,14 +22,18 @@ def world_position(entity: Any | None) -> Vec3:
 
 
 def world_rotation(entity: Any | None) -> Vec3:
-    rotation = Vec3()
-    current = entity
-    while current is not None:
-        rotation.x += current.transform.rotation.x
-        rotation.y += current.transform.rotation.y
-        rotation.z += current.transform.rotation.z
-        current = current.parent
-    return rotation
+    return world_quaternion(entity).to_euler()
+
+
+def world_quaternion(entity: Any | None) -> Quaternion:
+    if entity is None:
+        return Quaternion.identity()
+    local = entity.transform.local_quaternion
+    parent = getattr(entity, "parent", None)
+    if parent is None:
+        return local
+    combined = world_quaternion(parent) * local
+    return combined.normalized() if isinstance(combined, Quaternion) else local
 
 
 def world_scale(entity: Any | None) -> Vec3:
@@ -48,7 +52,8 @@ def world_scale(entity: Any | None) -> Vec3:
 
 
 def local_to_world_direction(entity: Any | None, direction: Vec3) -> Vec3:
-    return transform_direction(world_matrix(entity), direction)
+    rotated = world_quaternion(entity) * direction.normalized()
+    return rotated.normalized() if isinstance(rotated, Vec3) else Vec3()
 
 
 def world_to_local_point(entity: Any | None, point: Vec3) -> Vec3:
@@ -56,7 +61,8 @@ def world_to_local_point(entity: Any | None, point: Vec3) -> Vec3:
 
 
 def world_to_local_direction(entity: Any | None, direction: Vec3) -> Vec3:
-    return transform_direction(_inverse_affine(world_matrix(entity)), direction)
+    rotated = world_quaternion(entity).inverse() * direction.normalized()
+    return rotated.normalized() if isinstance(rotated, Vec3) else Vec3()
 
 
 def transform_direction(matrix: Mat4, direction: Vec3) -> Vec3:
@@ -89,12 +95,16 @@ def set_world_position(entity: Any, position: Vec3) -> None:
 
 
 def set_world_rotation(entity: Any, rotation: Vec3) -> None:
-    parent_rotation = world_rotation(getattr(entity, "parent", None))
-    entity.transform.rotation = Vec3(
-        rotation.x - parent_rotation.x,
-        rotation.y - parent_rotation.y,
-        rotation.z - parent_rotation.z,
-    )
+    set_world_quaternion(entity, Quaternion.from_euler(rotation))
+
+
+def set_world_quaternion(entity: Any, rotation: Quaternion) -> None:
+    parent = getattr(entity, "parent", None)
+    if parent is None:
+        entity.transform.local_quaternion = rotation
+        return
+    local = world_quaternion(parent).inverse() * rotation
+    entity.transform.local_quaternion = local if isinstance(local, Quaternion) else rotation
 
 
 def transform_point(matrix: Mat4, point: Vec3) -> Vec3:

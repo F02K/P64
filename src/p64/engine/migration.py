@@ -16,6 +16,8 @@ from p64.engine.files import (
     project_root_from_path,
 )
 from p64.engine.project import Project
+from p64.engine.scene import Scene
+from p64.engine.lighting import lighting_path_for_scene
 
 
 def migrate_project_files(project_path: Path) -> list[str]:
@@ -46,12 +48,59 @@ def migrate_project_files(project_path: Path) -> list[str]:
             metadata_path.rename(native)
             changes.append(f"{metadata_path.relative_to(root)} -> {native.relative_to(root)}")
 
+    for scene_path in _source_files(root, f"*{SCENE_SUFFIX}"):
+        try:
+            data = json.loads(scene_path.read_text(encoding="utf-8"))
+            quaternion_migration = _scene_needs_quaternion_migration(data)
+            lighting_migration = (
+                "render_settings" in data
+                or _scene_contains_fog(data)
+                or not lighting_path_for_scene(scene_path).exists()
+            )
+            if not quaternion_migration and not lighting_migration:
+                continue
+            Scene.load(scene_path).save(scene_path)
+            if quaternion_migration:
+                changes.append(f"Added quaternion rotations: {scene_path.relative_to(root)}")
+            if lighting_migration:
+                changes.append(f"Created scene lighting asset: {lighting_path_for_scene(scene_path).relative_to(root)}")
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+
     if project.startup_scene.startswith("scenes/"):
         project.startup_scene = "assets/" + project.startup_scene
     project.startup_scene = normalize_scene_path(project.startup_scene)
     ensure_builtin_package(root)
     project.save()
     return changes
+
+
+def _scene_needs_quaternion_migration(data: dict[str, object]) -> bool:
+    def entity_needs_migration(entity: object) -> bool:
+        if not isinstance(entity, dict):
+            return False
+        transform = entity.get("transform")
+        if isinstance(transform, dict) and "rotation_quaternion" not in transform:
+            return True
+        children = entity.get("children", [])
+        return isinstance(children, list) and any(entity_needs_migration(child) for child in children)
+
+    entities = data.get("entities", [])
+    return isinstance(entities, list) and any(entity_needs_migration(entity) for entity in entities)
+
+
+def _scene_contains_fog(data: dict[str, object]) -> bool:
+    def entity_contains_fog(entity: object) -> bool:
+        if not isinstance(entity, dict):
+            return False
+        components = entity.get("components", [])
+        if isinstance(components, list) and any(isinstance(component, dict) and component.get("type") == "Fog" for component in components):
+            return True
+        children = entity.get("children", [])
+        return isinstance(children, list) and any(entity_contains_fog(child) for child in children)
+
+    entities = data.get("entities", [])
+    return isinstance(entities, list) and any(entity_contains_fog(entity) for entity in entities)
 
 
 def _move_legacy_folder(source: Path, destination: Path, changes: list[str]) -> None:

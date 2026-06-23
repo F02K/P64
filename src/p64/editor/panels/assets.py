@@ -12,6 +12,7 @@ from p64.editor.ops import (
     create_script_template,
     create_shader_template,
     delete_asset_path,
+    duplicate_scene_asset,
     import_audio_asset,
     insert_obj_scene_entity,
     is_project_startup_scene,
@@ -20,7 +21,8 @@ from p64.editor.ops import (
     update_startup_scene_after_asset_rename,
 )
 from p64.engine.assets import AssetMetadata
-from p64.engine.files import is_metadata_file, is_scene_file
+from p64.engine.files import is_lighting_file, is_metadata_file, is_scene_file
+from p64.engine.lighting import scene_path_for_lighting
 from p64.engine.project import Project
 from p64.engine.scene import Scene
 from p64.engine.shader import parse_shader
@@ -98,7 +100,7 @@ def create_asset_browser_mixin(
                 for path in visible_asset_paths(folder):
                     item = QListWidgetItem(self._icon_for_asset(path), path.name)
                     item.setData(Qt.UserRole, str(path))
-                    if self.project and asset_path_is_editable(self.project, path):
+                    if self.project and asset_path_is_editable(self.project, path) and not is_lighting_file(path):
                         item.setFlags(item.flags() | Qt.ItemIsEditable)
                     self.assets.addItem(item)
             finally:
@@ -180,6 +182,9 @@ def create_asset_browser_mixin(
             if path and is_scene_file(path):
                 menu.addAction("Open Scene", lambda: self._open_scene_asset(path))
                 menu.addAction("Set As Startup Scene", lambda: self._set_startup_scene(path))
+                menu.addAction("Duplicate Scene", lambda: self._duplicate_scene_asset(path))
+            if path and is_lighting_file(path):
+                menu.addAction("Open Lighting Settings", lambda: self._open_lighting_asset(path))
             menu.addAction("Create Scene", self._create_scene_asset)
             menu.addAction("Create Shader", self._create_shader_asset)
             menu.addAction("Create Script", self._create_script_asset)
@@ -221,6 +226,8 @@ def create_asset_browser_mixin(
                 self._update_viewport_status()
             elif is_scene_file(path):
                 self._open_scene_asset(path)
+            elif is_lighting_file(path):
+                self._open_lighting_asset(path)
             elif path.suffix.lower() in {".shader", ".py"}:
                 self._open_path(path)
 
@@ -270,6 +277,8 @@ def create_asset_browser_mixin(
 
         def _asset_path_can_be_modified(self, path: Path) -> bool:
             if not self.project or not asset_path_is_editable(self.project, path):
+                return False
+            if is_lighting_file(path):
                 return False
             return path.resolve() != self.project.assets_dir.resolve()
 
@@ -434,6 +443,18 @@ def create_asset_browser_mixin(
             self._refresh_assets_from_watcher()
             self._log(f"Created scene: {path}")
 
+        def _duplicate_scene_asset(self, path: Path) -> None:
+            if not self.project:
+                return
+            try:
+                duplicated, _lighting = duplicate_scene_asset(self.project, path)
+                self.current_asset_folder = duplicated.parent
+                self._refresh_assets_from_watcher()
+                self._select_asset_path(duplicated)
+                self._log(f"Duplicated scene: {duplicated}")
+            except Exception as exc:
+                QMessageBox.critical(self, "Duplicate scene failed", str(exc))
+
         def _open_scene_asset(self, path: Path) -> None:
             if not self.project:
                 return
@@ -451,6 +472,17 @@ def create_asset_browser_mixin(
             except Exception as exc:
                 QMessageBox.critical(self, "Open scene failed", str(exc))
 
+        def _open_lighting_asset(self, path: Path) -> None:
+            scene_path = scene_path_for_lighting(path)
+            if not scene_path.exists():
+                QMessageBox.warning(self, "Lighting asset", f"Coupled Scene is missing: {scene_path.name}")
+                return
+            if not self.current_scene_path or self.current_scene_path.resolve() != scene_path.resolve():
+                self._open_scene_asset(scene_path)
+                if not self.current_scene_path or self.current_scene_path.resolve() != scene_path.resolve():
+                    return
+            self._open_lighting_settings()
+
         def _set_startup_scene(self, path: Path) -> None:
             if not self.project:
                 return
@@ -462,6 +494,9 @@ def create_asset_browser_mixin(
                 QMessageBox.critical(self, "Startup scene failed", str(exc))
 
         def _open_path(self, path: Path) -> None:
+            if is_lighting_file(path):
+                self._open_lighting_asset(path)
+                return
             if self.project and path.suffix.lower() == ".py":
                 message = open_script_in_vscode_project(
                     self.project,

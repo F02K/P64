@@ -184,32 +184,20 @@ class EditorImportTests(unittest.TestCase):
 
     def test_color_fields_use_color_picker_not_vec3_editor(self):
         source = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
-        fog_editor = source[source.index("def _add_fog_editor"):source.index("def _add_camera_editor")]
         light_editor = source[source.index("def _add_light_editor"):source.index("def _add_audio_source_editor")]
         material_fields = source[source.index("def _add_material_editor_fields"):source.index("def _add_material_slots_editor")]
 
         self.assertIn("QColorDialog.getColor", source)
         self.assertIn("def _color_editor", source)
-        self.assertIn('form.addRow("Color", self._color_editor', fog_editor)
         self.assertIn('form.addRow("Color", self._color_editor', light_editor)
         self.assertIn('prop.kind == "color"', material_fields)
-        self.assertNotIn("_vec3_editor(component.color)", fog_editor)
         self.assertNotIn("_vec3_editor(component.color)", light_editor)
 
-    def test_empty_selection_inspector_exposes_scene_skybox_settings(self):
+    def test_empty_selection_inspector_has_no_scene_render_settings_fallback(self):
         source = Path("src/p64/editor/inspectors/components.py").read_text(encoding="utf-8")
-        scene_editor = source[source.index("def _add_scene_render_settings_editor"):source.index("def _add_entity_header")]
 
-        self.assertIn('"Scene Render Settings"', scene_editor)
-        self.assertIn('"Skybox Enabled"', scene_editor)
-        self.assertIn('"Sky Top"', scene_editor)
-        self.assertIn('"Sky Horizon"', scene_editor)
-        self.assertIn('"Cloud Color"', scene_editor)
-        self.assertIn('"Cloud Height"', scene_editor)
-        self.assertIn('"Cloud Softness"', scene_editor)
-        self.assertIn("self._color_editor", scene_editor)
-        self.assertNotIn("_vec3_editor", scene_editor)
-        self.assertIn('self._mark_dirty("Edit Scene Render Settings")', source)
+        self.assertNotIn("def _add_scene_render_settings_editor", source)
+        self.assertIn('"No SceneObject selected"', source)
 
     def test_texture_picker_finds_only_image_assets_and_packages(self):
         with TemporaryDirectory() as tmp:
@@ -407,21 +395,30 @@ class EditorImportTests(unittest.TestCase):
         self.assertIn('selected_entity_id=selected.id if selected and self.view_mode != "Game" else None', source)
         self.assertIn("self._draw_ui_bounds_overlay(scene, selected)", source)
 
-    def test_lighting_settings_helper_updates_scene_render_settings(self):
+    def test_lighting_settings_helper_updates_scene_lighting_settings(self):
         scene = Scene("Lighting")
 
         settings = apply_lighting_settings(scene, {
             "skybox_enabled": False,
-            "fog": False,
+            "fog_enabled": False,
             "skybox_cloud_coverage": 2.0,
             "skybox_cloud_softness": -1.0,
         })
 
         self.assertFalse(settings["skybox_enabled"])
-        self.assertFalse(settings["fog"])
+        self.assertFalse(settings["fog_enabled"])
         self.assertEqual(settings["skybox_cloud_coverage"], 1.0)
         self.assertEqual(settings["skybox_cloud_softness"], 0.0)
-        self.assertIs(scene.render_settings, settings)
+        self.assertIs(scene.lighting_settings, settings)
+
+    def test_lighting_dialog_identifies_active_scene_and_has_fog_tab(self):
+        source = Path("src/p64/editor/dialogs/lighting_settings.py").read_text(encoding="utf-8")
+
+        self.assertIn('"Sky & Clouds"', source)
+        self.assertIn('"Fog"', source)
+        self.assertIn("Active Scene:", source)
+        self.assertIn("lighting_path_for_scene(scene_path)", source)
+        self.assertIn("Lighting Settings —", source)
 
     def test_asset_browser_uses_image_thumbnails(self):
         source = Path("src/p64/editor/panels/assets.py").read_text(encoding="utf-8")

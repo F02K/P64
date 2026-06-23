@@ -17,6 +17,7 @@ from p64.engine.math import Vec3
 from p64.engine.project import Project
 from p64.engine.runtime_session import RuntimeSession
 from p64.engine.scene import Scene
+from p64.engine.scripting import GameScript, ScriptContext
 
 
 class CollisionTests(unittest.TestCase):
@@ -49,6 +50,81 @@ class CollisionTests(unittest.TestCase):
 
         self.assertEqual({hit.entity.name for hit in all_hits}, {"Blocker", "Trigger"})
         self.assertEqual([hit.entity.name for hit in blocking_hits], ["Blocker"])
+
+    def test_raycast_hits_rotated_box_and_sphere_and_returns_exit_from_inside(self):
+        box = Entity("Box")
+        box.transform.position = Vec3(0.0, 0.0, -5.0)
+        box.transform.rotation.y = 45.0
+        box.add_component(Collider(shape="box", size=Vec3(2.0, 2.0, 2.0)))
+        sphere = Entity("Sphere")
+        sphere.transform.position = Vec3(0.0, 0.0, -9.0)
+        sphere.add_component(Collider(shape="sphere", radius=1.0))
+        world = CollisionWorld(Scene("Raycast", [box, sphere]))
+
+        hits = world.raycast_all(Vec3(), Vec3(0.0, 0.0, -1.0))
+        inside = world.raycast(Vec3(0.0, 0.0, -9.0), Vec3(1.0, 0.0, 0.0))
+
+        self.assertEqual([hit.entity.name for hit in hits], ["Box", "Sphere"])
+        self.assertLess(hits[0].distance, hits[1].distance)
+        self.assertAlmostEqual(hits[0].point.z, -3.585786, places=5)
+        self.assertIsNotNone(inside)
+        self.assertAlmostEqual(inside.distance, 1.0, places=6)
+        self.assertEqual(inside.normal, Vec3(1.0, 0.0, 0.0))
+
+    def test_raycast_filters_layers_triggers_distance_and_ignored_subtree(self):
+        parent = Entity("Ignored")
+        child = parent.add_child(Entity("Ignored Child"))
+        child.transform.position.z = -2.0
+        child.add_component(Collider(layer="Player"))
+        trigger = Entity("Trigger")
+        trigger.transform.position.z = -4.0
+        trigger.add_component(Collider(layer="World", is_trigger=True))
+        target = Entity("Target")
+        target.transform.position.z = -6.0
+        target.add_component(Collider(layer="World"))
+        world = CollisionWorld(Scene("Raycast", [parent, trigger, target]))
+
+        hit = world.raycast(Vec3(), Vec3(0.0, 0.0, -1.0), 10.0, "World", False, parent)
+        trigger_hit = world.raycast(Vec3(), Vec3(0.0, 0.0, -1.0), 5.0, "World", True, parent)
+        too_short = world.raycast(Vec3(), Vec3(0.0, 0.0, -1.0), 3.0, "World", True, parent)
+
+        self.assertEqual(hit.entity.name, "Target")
+        self.assertEqual(trigger_hit.entity.name, "Trigger")
+        self.assertIsNone(too_short)
+        self.assertIsNone(world.raycast(Vec3(), Vec3(), 10.0))
+
+    def test_raycast_hits_convex_and_non_convex_mesh_colliders(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            metadata = _import_cube_mesh(project)
+            solid = Entity("Solid", object_type=GAME_OBJECT)
+            solid.transform.position.z = -3.0
+            solid.add_component(ModelRenderer(model=metadata.id))
+            solid.add_component(Collider(shape="mesh"))
+            hull = Entity("Hull", object_type=ENTITY)
+            hull.transform.position.z = -7.0
+            hull.add_component(ModelRenderer(model=metadata.id))
+            hull.add_component(Collider(shape="mesh", convex=True))
+
+            hits = CollisionWorld(Scene("Meshes", [solid, hull]), project).raycast_all(Vec3(), Vec3(0.0, 0.0, -1.0))
+
+            self.assertEqual([hit.entity.name for hit in hits], ["Solid", "Hull"])
+            self.assertTrue(all(hit.normal.length() > 0.99 for hit in hits))
+
+    def test_game_script_raycast_shortcut_ignores_own_collider_by_default(self):
+        actor = Entity("Actor")
+        actor.add_component(Collider())
+        target = Entity("Target")
+        target.transform.position.z = -3.0
+        target.add_component(Collider())
+        scene = Scene("Raycast", [actor, target])
+        world = CollisionWorld(scene)
+        script = GameScript(actor, ScriptContext(scene=scene, collision_world=world))
+
+        hit = script.raycast(Vec3(), Vec3(0.0, 0.0, -1.0))
+
+        self.assertIsNotNone(hit)
+        self.assertIs(hit.entity, target)
 
     def test_character_controller_blocks_wall_and_lands_on_floor(self):
         player = Entity("Player")

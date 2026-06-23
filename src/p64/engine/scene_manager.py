@@ -99,7 +99,7 @@ class SceneManager:
         if target is None:
             return
         target.transform.position = Vec3.from_value(spawn_entity.transform.position)
-        target.transform.rotation = Vec3.from_value(spawn_entity.transform.rotation)
+        target.transform.local_quaternion = spawn_entity.transform.local_quaternion
 
     def _first_persistent_entity(self) -> Entity | None:
         for entity in self._persistent_entities.values():

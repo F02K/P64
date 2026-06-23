@@ -10,7 +10,6 @@ class RenderSettings:
     texture_filter: str = "three_point"
     color_levels: int = 32
     dithering: bool = True
-    fog: bool = True
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "RenderSettings":
@@ -21,7 +20,6 @@ class RenderSettings:
             texture_filter=str(data.get("texture_filter", "three_point")),
             color_levels=int(data.get("color_levels", 32)),
             dithering=bool(data.get("dithering", True)),
-            fog=bool(data.get("fog", True)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -30,5 +28,4 @@ class RenderSettings:
             "texture_filter": self.texture_filter,
             "color_levels": self.color_levels,
             "dithering": self.dithering,
-            "fog": self.fog,
         }

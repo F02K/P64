@@ -15,6 +15,7 @@ MyGame/
   assets/
     scenes/
       main.scenep64
+      main.lightingp64
     scripts/
       player.py
     shaders/
@@ -46,6 +47,8 @@ MyGame/
 - `project.p64` stores project settings, render settings, build settings, and the
   startup scene path.
 - `.scenep64` files store editable scenes.
+- `.lightingp64` files store the coupled sky, cloud, and global fog settings for
+  the Scene with the same filename stem.
 - `.material` files store editable runtime material data.
 - `.mdp64` files store generated asset metadata and editor-only sidecar data.
 - `.shader` files store custom shader source.
@@ -91,7 +94,9 @@ and material extraction mappings. Material sidecars such as
 `Mat.material.mdp64` store reset defaults, source links, and usage cache
 information. WAV sidecars describe AudioClip import settings, original and
 runtime sample rates, duration, sample count, and the generated mono WAV path.
-Scenes and `.material` files remain the authoritative runtime data.
+Scenes, their coupled `.lightingp64` assets, and `.material` files remain the
+authoritative runtime data. Scene and Lighting assets are created, renamed,
+duplicated, moved, and deleted together by the editor.
 
 ## Legacy Files
 

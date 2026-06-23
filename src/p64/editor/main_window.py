@@ -395,8 +395,6 @@ def launch_editor(project_path: Path | None = None) -> None:
             if not self.project:
                 return
             def on_saved() -> None:
-                if self.scene:
-                    self.scene.render_settings = dict(self.project.render_settings)
                 self.viewport.reload_assets()
                 self.viewport.update()
                 self._update_window_title()
@@ -422,7 +420,8 @@ def launch_editor(project_path: Path | None = None) -> None:
                 self.viewport.reload_assets()
                 self.viewport.update()
 
-            open_lighting_settings_dialog(self, self.scene, on_changed)
+            scene_path = self.current_scene_path or self.project.resolve_scene_path(self.project.startup_scene)
+            open_lighting_settings_dialog(self, self.scene, scene_path, on_changed)
 
         def _open_analysis(self) -> None:
             if self.analysis_window is None:
@@ -501,6 +500,7 @@ def launch_editor(project_path: Path | None = None) -> None:
             self._restoring_history = True
             try:
                 self.scene = Scene.from_dict(state.scene_data)
+                self.scene.lighting_settings = dict(state.lighting_settings)
                 self.selected = self.scene.find(state.selection_id) if state.selection_id else None
                 self.selected_asset = None
                 self.dirty.dirty = self.undo.is_dirty

@@ -78,8 +78,6 @@ STANDARD_VERTEX_LIT_FRAGMENT_SHADER = """
 uniform sampler2D u_texture;
 uniform bool u_fog_enabled;
 uniform vec3 u_fog_color;
-uniform vec3 u_fog_center;
-uniform vec3 u_fog_size;
 uniform vec3 u_camera_position;
 uniform float u_fog_near;
 uniform float u_fog_far;
@@ -138,12 +136,9 @@ void main() {
     }
     vec3 lit = texel.rgb * u_base_color * v_color * v_light;
     vec3 quantized = quantize_color(lit);
-    vec3 half_size = max(u_fog_size * 0.5, vec3(0.001));
-    vec3 volume_pos = abs(v_world_pos - u_fog_center) / half_size;
-    float inside_volume = 1.0 - smoothstep(0.92, 1.0, max(max(volume_pos.x, volume_pos.y), volume_pos.z));
     float distance_fog = smoothstep(u_fog_near, u_fog_far, distance(v_world_pos, u_camera_position));
     float density_fog = clamp(u_fog_density, 0.0, 1.0);
-    float fog_amount = u_fog_enabled ? inside_volume * max(distance_fog, density_fog) : 0.0;
+    float fog_amount = u_fog_enabled ? max(distance_fog, density_fog) : 0.0;
     fragColor = vec4(mix(quantized, u_fog_color, fog_amount), texel.a);
 }
 """
@@ -174,8 +169,6 @@ STANDARD_UNLIT_FRAGMENT_SHADER = """
 uniform sampler2D u_texture;
 uniform bool u_fog_enabled;
 uniform vec3 u_fog_color;
-uniform vec3 u_fog_center;
-uniform vec3 u_fog_size;
 uniform vec3 u_camera_position;
 uniform float u_fog_near;
 uniform float u_fog_far;
@@ -232,12 +225,9 @@ void main() {
         discard;
     }
     vec3 quantized = quantize_color(texel.rgb * u_base_color * v_color);
-    vec3 half_size = max(u_fog_size * 0.5, vec3(0.001));
-    vec3 volume_pos = abs(v_world_pos - u_fog_center) / half_size;
-    float inside_volume = 1.0 - smoothstep(0.92, 1.0, max(max(volume_pos.x, volume_pos.y), volume_pos.z));
     float distance_fog = smoothstep(u_fog_near, u_fog_far, distance(v_world_pos, u_camera_position));
     float density_fog = clamp(u_fog_density, 0.0, 1.0);
-    float fog_amount = u_fog_enabled ? inside_volume * max(distance_fog, density_fog) : 0.0;
+    float fog_amount = u_fog_enabled ? max(distance_fog, density_fog) : 0.0;
     fragColor = vec4(mix(quantized, u_fog_color, fog_amount), texel.a);
 }
 """

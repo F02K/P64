@@ -1,4 +1,4 @@
-from p64.engine.collision import CollisionWorld
+from p64.engine.collision import CollisionWorld, RaycastHit
 from p64.engine.components import (
     AudioListener,
     AudioSource,
@@ -8,9 +8,13 @@ from p64.engine.components import (
     CharacterController,
     Collider,
     EntityPhysics,
-    Fog,
     UIImage,
+    UIButton,
+    UIControl,
+    UIScrollView,
+    UISlider,
     UIText,
+    UIToggle,
     Light,
     MeshRenderer,
     ModelRenderer,
@@ -22,11 +26,12 @@ from p64.engine.components import (
     Transform,
 )
 from p64.engine.entity import ENTITY, GAME_OBJECT, Entity, SceneObject, set_object_type_recursive
+from p64.engine.math import Quaternion, Vec3
 from p64.engine.project import Project
 from p64.engine.scene import Scene
 from p64.engine.scene_manager import SceneManager
 from p64.engine.scripting import GameScript
-from p64.engine.transforms import local_to_world_direction, parent_world_matrix, set_world_position, set_world_rotation, transform_direction, world_forward, world_matrix, world_position, world_right, world_rotation, world_scale, world_to_local_direction, world_to_local_point, world_up
+from p64.engine.transforms import local_to_world_direction, parent_world_matrix, set_world_position, set_world_quaternion, set_world_rotation, transform_direction, world_forward, world_matrix, world_position, world_quaternion, world_right, world_rotation, world_scale, world_to_local_direction, world_to_local_point, world_up
 
 __all__ = [
     "Camera",
@@ -40,16 +45,22 @@ __all__ = [
     "EntityPhysics",
     "ENTITY",
     "Entity",
-    "Fog",
     "GAME_OBJECT",
     "GameScript",
     "UIImage",
+    "UIButton",
+    "UIControl",
+    "UIScrollView",
+    "UISlider",
     "UIText",
+    "UIToggle",
     "Light",
     "MeshRenderer",
     "ModelRenderer",
     "ParticleEmitter",
     "Project",
+    "Quaternion",
+    "RaycastHit",
     "Scene",
     "SceneObject",
     "SceneManager",
@@ -59,9 +70,11 @@ __all__ = [
     "SpawnPoint",
     "SpriteRenderer",
     "Transform",
+    "Vec3",
     "parent_world_matrix",
     "set_world_position",
     "set_world_rotation",
+    "set_world_quaternion",
     "local_to_world_direction",
     "transform_direction",
     "world_forward",
@@ -69,6 +82,7 @@ __all__ = [
     "world_position",
     "world_right",
     "world_rotation",
+    "world_quaternion",
     "world_scale",
     "world_to_local_direction",
     "world_to_local_point",

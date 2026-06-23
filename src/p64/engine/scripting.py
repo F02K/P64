@@ -7,8 +7,8 @@ from types import ModuleType
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
-from p64.engine.collision import CollisionWorld
-from p64.engine.components import AudioSource, CharacterController, EntityPhysics, ParticleEmitter, RectTransform, ScriptComponent, ScriptEntry, SpriteRenderer, Transform, UIImage, UIText
+from p64.engine.collision import CollisionWorld, RaycastHit
+from p64.engine.components import AudioSource, CharacterController, EntityPhysics, ParticleEmitter, RectTransform, ScriptComponent, ScriptEntry, SpriteRenderer, Transform, UIButton, UIControl, UIImage, UIScrollView, UISlider, UIText, UIToggle
 from p64.engine.input import InputState
 from p64.engine.math import Vec3
 
@@ -36,6 +36,7 @@ class GameScript:
     scene: Scene | None
     project: Project | None
     scene_manager: SceneManager | None
+    collision_world: CollisionWorld | None
     input: InputState
     time: float
     character_controller: CharacterController | None
@@ -45,6 +46,11 @@ class GameScript:
     particle_emitter: ParticleEmitter | None
     ui_image: UIImage | None
     ui_text: UIText | None
+    ui_control: UIControl | None
+    ui_button: UIButton | None
+    ui_toggle: UIToggle | None
+    ui_slider: UISlider | None
+    ui_scroll_view: UIScrollView | None
 
     def __init__(self, entity: Any, context: ScriptContext | None = None, **properties: Any) -> None:
         self.entity = entity
@@ -53,6 +59,7 @@ class GameScript:
         self.scene = context.scene if context else None
         self.project = context.project if context else None
         self.scene_manager = context.scene_manager if context else None
+        self.collision_world = context.collision_world if context else None
         self.input = context.input if context else InputState()
         self.time = context.time if context else 0.0
         self.character_controller = self._find_character_controller()
@@ -62,6 +69,11 @@ class GameScript:
         self.particle_emitter = self._find_component(ParticleEmitter)
         self.ui_image = self._find_component(UIImage)
         self.ui_text = self._find_component(UIText)
+        self.ui_control = self._find_component(UIControl)
+        self.ui_button = self._find_component(UIButton)
+        self.ui_toggle = self._find_component(UIToggle)
+        self.ui_slider = self._find_component(UISlider)
+        self.ui_scroll_view = self._find_component(UIScrollView)
         if self.character_controller is not None and context is not None:
             self.character_controller.bind_runtime(entity, context.scene, context.project, context.collision_world)
         for key, value in properties.items():
@@ -74,6 +86,46 @@ class GameScript:
         if self.scene is None or self.character_controller is None:
             return Vec3()
         return self.character_controller.move(motion, dt)
+
+    def raycast(
+        self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: float = float("inf"),
+        layer_mask: str = "*",
+        include_triggers: bool = False,
+        ignore_entity: Entity | None = None,
+    ) -> RaycastHit | None:
+        if self.collision_world is None:
+            return None
+        return self.collision_world.raycast(
+            origin,
+            direction,
+            max_distance,
+            layer_mask,
+            include_triggers,
+            self.entity if ignore_entity is None else ignore_entity,
+        )
+
+    def raycast_all(
+        self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: float = float("inf"),
+        layer_mask: str = "*",
+        include_triggers: bool = False,
+        ignore_entity: Entity | None = None,
+    ) -> list[RaycastHit]:
+        if self.collision_world is None:
+            return []
+        return self.collision_world.raycast_all(
+            origin,
+            direction,
+            max_distance,
+            layer_mask,
+            include_triggers,
+            self.entity if ignore_entity is None else ignore_entity,
+        )
 
     @property
     def forward(self) -> Vec3:

@@ -130,6 +130,16 @@ class ShaderAssetTests(unittest.TestCase):
         self.assertNotIn("u_projection *", UI_VERTEX_SHADER)
         self.assertIn("gl_Position = vec4(in_position.xy, 0.0, 1.0);", UI_VERTEX_SHADER)
 
+    def test_builtin_mesh_fog_is_global_without_volume_uniforms(self):
+        from p64.renderer.shaders import STANDARD_UNLIT_FRAGMENT_SHADER, STANDARD_VERTEX_LIT_FRAGMENT_SHADER
+
+        for source in (STANDARD_VERTEX_LIT_FRAGMENT_SHADER, STANDARD_UNLIT_FRAGMENT_SHADER):
+            self.assertIn("u_fog_near", source)
+            self.assertIn("u_fog_density", source)
+            self.assertNotIn("u_fog_center", source)
+            self.assertNotIn("u_fog_size", source)
+            self.assertNotIn("inside_volume", source)
+
         shader = parse_shader(Path("samples/FirstScene/packages/P64Builtin/shaders/ui_image.shader"))
         self.assertNotIn("uniform mat4 u_projection", shader.vertex)
         self.assertNotIn("u_projection *", shader.vertex)

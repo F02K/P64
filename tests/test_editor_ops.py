@@ -14,6 +14,7 @@ from p64.editor.ops import (
     create_shader_template,
     delete_asset_path,
     delete_entity,
+    duplicate_scene_asset,
     duplicate_entity,
     extract_materials_for_obj,
     insert_obj_scene_entity,
@@ -32,6 +33,7 @@ from p64.engine.assets import AssetMetadata
 from p64.engine.builtin import PARTICLE_MATERIAL_RELATIVE, SPRITE_MATERIAL_RELATIVE, UI_IMAGE_MATERIAL_RELATIVE
 from p64.engine.components import AudioListener, Camera, Canvas, Collider, EntityPhysics, MeshRenderer, ModelRenderer, ParticleEmitter, RectTransform, ScriptComponent, ScriptEntry, SpriteRenderer, UIImage, UIText
 from p64.engine.files import find_metadata_for_source
+from p64.engine.lighting import lighting_path_for_scene
 from p64.engine.material import MaterialAsset, load_material_metadata
 from p64.engine.entity import ENTITY, GAME_OBJECT, Entity
 from p64.engine.project import Project
@@ -228,6 +230,40 @@ class EditorOpsTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertEqual(project.startup_scene, "assets/scenes/renamed.scenep64")
             self.assertEqual(Project.load(project.root).startup_scene, "assets/scenes/renamed.scenep64")
+            self.assertTrue(lighting_path_for_scene(new_scene).exists())
+            self.assertFalse(lighting_path_for_scene(old_scene).exists())
+
+    def test_scene_lighting_asset_lifecycle_is_strictly_coupled(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            scene = project.resolve_scene_path(project.startup_scene)
+            lighting = lighting_path_for_scene(scene)
+
+            duplicate, duplicate_lighting = duplicate_scene_asset(project, scene)
+            self.assertTrue(duplicate.exists())
+            self.assertTrue(duplicate_lighting.exists())
+            with self.assertRaises(AssetOperationError):
+                rename_asset_path(project, lighting, "renamed.lightingp64")
+            with self.assertRaises(AssetOperationError):
+                delete_asset_path(project, lighting)
+
+            delete_asset_path(project, duplicate)
+            self.assertFalse(duplicate.exists())
+            self.assertFalse(duplicate_lighting.exists())
+
+    def test_validation_reports_missing_or_invalid_lighting_asset(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game")
+            scene = project.resolve_scene_path(project.startup_scene)
+            lighting = lighting_path_for_scene(scene)
+            lighting.unlink()
+
+            missing = validate_project(project.root)
+            self.assertTrue(any("Lighting asset missing" in error for error in missing.errors))
+
+            lighting.write_text("[]\n", encoding="utf-8")
+            invalid = validate_project(project.root)
+            self.assertTrue(any("Invalid lighting asset" in error for error in invalid.errors))
 
     def test_component_and_script_entry_ordering(self):
         entity = Entity("Root")

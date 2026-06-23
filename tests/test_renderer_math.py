@@ -632,7 +632,7 @@ class RendererMathTests(unittest.TestCase):
             entity = Entity("Static Model")
             entity.add_component(ModelRenderer(model=metadata.id, source_materials=["Stone"], material_slots=[None]))
             scene = Scene("Test", [entity])
-            scene.render_settings["skybox_enabled"] = False
+            scene.lighting_settings["skybox_enabled"] = False
             renderer = _renderer(project)
             recorder = ProfilerRecorder()
             recorder.set_enabled(True)
@@ -674,7 +674,7 @@ class RendererMathTests(unittest.TestCase):
             entity = Entity("Static Model")
             entity.add_component(ModelRenderer(model=metadata.id))
             scene = Scene("Test", [entity])
-            scene.render_settings["skybox_enabled"] = False
+            scene.lighting_settings["skybox_enabled"] = False
             renderer = _renderer(project)
             recorder = ProfilerRecorder()
             recorder.set_enabled(True)
@@ -697,7 +697,7 @@ class RendererMathTests(unittest.TestCase):
             entity = Entity("Target")
             entity.add_component(MeshRenderer(mesh="missing"))
             scene = Scene("Test", [entity])
-            scene.render_settings["skybox_enabled"] = True
+            scene.lighting_settings["skybox_enabled"] = True
             renderer = _renderer(project)
             events: list[str] = []
             renderer._draw_skybox = lambda *_args: events.append("skybox")
@@ -740,7 +740,7 @@ class RendererMathTests(unittest.TestCase):
             project = Project.create(Path(tmp) / "Game")
             renderer = _renderer(project)
             scene = Scene("No Profiler")
-            scene.render_settings["skybox_enabled"] = False
+            scene.lighting_settings["skybox_enabled"] = False
             calls: list[str] = []
             renderer._add_render_counts = lambda _active_entities: calls.append("counts")
 
@@ -796,7 +796,7 @@ class RendererMathTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game")
             scene = Scene("Test")
-            scene.render_settings["skybox_enabled"] = False
+            scene.lighting_settings["skybox_enabled"] = False
             renderer = _renderer(project)
             calls: list[str] = []
             renderer._draw_skybox = lambda *_args: calls.append("skybox")
@@ -833,7 +833,7 @@ class RendererMathTests(unittest.TestCase):
             entity = Entity("Hud")
             entity.add_component(UIImage())
             scene = Scene("UI", [entity])
-            scene.render_settings["skybox_enabled"] = False
+            scene.lighting_settings["skybox_enabled"] = False
             logs: list[str] = []
             renderer = _renderer(project, logs.append)
             renderer.ctx.fail_blend_func_not_implemented = True

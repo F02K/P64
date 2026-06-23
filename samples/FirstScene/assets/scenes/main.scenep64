@@ -1,35 +1,5 @@
 {
   "name": "main",
-  "render_settings": {
-    "internal_resolution": [
-      320,
-      240
-    ],
-    "texture_filter": "three_point",
-    "color_levels": 32,
-    "dithering": true,
-    "fog": true,
-    "skybox_enabled": true,
-    "skybox_top_color": [
-      0.22,
-      0.48,
-      0.86
-    ],
-    "skybox_horizon_color": [
-      0.66,
-      0.82,
-      0.95
-    ],
-    "skybox_cloud_color": [
-      1.0,
-      0.96,
-      0.86
-    ],
-    "skybox_cloud_coverage": 0.45,
-    "skybox_cloud_scale": 3.0,
-    "skybox_cloud_height": 80.0,
-    "skybox_cloud_softness": 0.08
-  },
   "entities": [
     {
       "id": "camera",
@@ -108,50 +78,6 @@
           "range": 12.0,
           "spot_angle": 45.0,
           "falloff": 2.0
-        }
-      ],
-      "children": []
-    },
-    {
-      "id": "fog",
-      "name": "Fog",
-      "object_type": "entity",
-      "active": true,
-      "persistent": false,
-      "transform": {
-        "position": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "rotation": [
-          0.0,
-          0.0,
-          0.0
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      },
-      "components": [
-        {
-          "type": "Fog",
-          "enabled": true,
-          "color": [
-            0.46,
-            0.58,
-            0.72
-          ],
-          "size": [
-            80.0,
-            35.0,
-            80.0
-          ],
-          "near": 18.0,
-          "far": 85.0,
-          "density": 0.08
         }
       ],
       "children": []

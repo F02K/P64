@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
+import json
 import shutil
 import subprocess
 import unittest
@@ -8,15 +9,16 @@ import unittest
 from p64.__main__ import main as p64_main
 import p64.engine.project as project_module
 from p64.engine.builtin import LEGACY_STANDARD_SHADER_RELATIVE, PARTICLE_MATERIAL_RELATIVE, SPRITE_MATERIAL_RELATIVE, STANDARD_SHADER_RELATIVE, STANDARD_UNLIT_SHADER_RELATIVE, UI_IMAGE_MATERIAL_RELATIVE
-from p64.engine.components import AudioListener, Camera, Canvas, EntityPhysics, Fog, Light, MeshRenderer, ModelRenderer, ParticleEmitter, RectTransform, ScriptComponent, ScriptEntry, SpawnPoint, SpriteRenderer, Transform, UIImage, UIText
+from p64.engine.components import AudioListener, Camera, Canvas, EntityPhysics, Light, MeshRenderer, ModelRenderer, ParticleEmitter, RectTransform, ScriptComponent, ScriptEntry, SpawnPoint, SpriteRenderer, Transform, UIImage, UIText
 from p64.engine.entity import GAME_OBJECT, Entity, entity_effectively_active, set_object_type_recursive
 from p64.engine.migration import migrate_project_files
-from p64.engine.math import Vec3
+from p64.engine.math import Quaternion, Vec3
 from p64.engine.project import Project, _builder_script_source, _source_p64_package_dir, default_render_settings, ensure_project_runtime_env, is_project_runtime_env_ready
 from p64.engine.render_settings import clamp_render_settings
+from p64.engine.lighting import clamp_lighting_settings, default_lighting_settings, lighting_path_for_scene
 from p64.engine.scene import Scene
 from p64.engine.scene_manager import SceneManager
-from p64.engine.transforms import local_to_world_direction, set_world_position, world_forward, world_position, world_right, world_rotation, world_scale, world_up
+from p64.engine.transforms import local_to_world_direction, set_world_position, set_world_quaternion, world_forward, world_position, world_quaternion, world_right, world_rotation, world_scale, world_up
 from p64.engine.vscode import setup_vscode_project
 
 
@@ -244,8 +246,8 @@ class ProjectSceneTests(unittest.TestCase):
             self.assertEqual(loaded.editor_settings["scene_grid"]["spacing"], 2.5)
             self.assertEqual(loaded.render_settings["color_levels"], 2)
 
-    def test_render_settings_include_default_skybox_values(self):
-        settings = default_render_settings()
+    def test_lighting_settings_include_default_skybox_and_fog_values(self):
+        settings = default_lighting_settings()
 
         self.assertTrue(settings["skybox_enabled"])
         self.assertEqual(len(settings["skybox_top_color"]), 3)
@@ -257,25 +259,30 @@ class ProjectSceneTests(unittest.TestCase):
         self.assertGreater(settings["skybox_cloud_height"], 0.0)
         self.assertGreaterEqual(settings["skybox_cloud_softness"], 0.0)
         self.assertLessEqual(settings["skybox_cloud_softness"], 1.0)
+        self.assertTrue(settings["fog_enabled"])
+        self.assertEqual(settings["fog_near"], 18.0)
+        self.assertEqual(settings["fog_far"], 85.0)
 
-    def test_legacy_scene_load_gets_skybox_defaults(self):
+    def test_legacy_scene_load_gets_lighting_defaults(self):
         scene = Scene.from_dict({"name": "Legacy", "entities": []})
 
-        self.assertTrue(scene.render_settings["skybox_enabled"])
-        self.assertIn("skybox_cloud_coverage", scene.render_settings)
-        self.assertIn("skybox_cloud_height", scene.render_settings)
-        self.assertIn("skybox_cloud_softness", scene.render_settings)
+        self.assertTrue(scene.lighting_settings["skybox_enabled"])
+        self.assertIn("skybox_cloud_coverage", scene.lighting_settings)
+        self.assertTrue(scene.lighting_settings["fog_enabled"])
 
-    def test_skybox_cloud_values_are_clamped(self):
-        settings = clamp_render_settings({
+    def test_lighting_values_are_clamped(self):
+        settings = clamp_lighting_settings({
             "skybox_cloud_height": -5.0,
             "skybox_cloud_softness": 2.0,
             "skybox_cloud_coverage": -1.0,
+            "fog_near": 20.0,
+            "fog_far": 10.0,
         })
 
         self.assertEqual(settings["skybox_cloud_height"], 0.1)
         self.assertEqual(settings["skybox_cloud_softness"], 1.0)
         self.assertEqual(settings["skybox_cloud_coverage"], 0.0)
+        self.assertGreater(settings["fog_far"], settings["fog_near"])
 
     def test_existing_project_save_adds_build_pipeline(self):
         with TemporaryDirectory() as tmp:
@@ -361,6 +368,21 @@ class ProjectSceneTests(unittest.TestCase):
             self.assertFalse(old_scene.exists())
             self.assertTrue(any("project.p64.json" in change for change in changes))
 
+    def test_migration_adds_quaternion_rotation_to_old_scene(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            scene_path = project.scenes_dir / "main.scenep64"
+            data = json.loads(scene_path.read_text(encoding="utf-8"))
+            for entity in data["entities"]:
+                entity["transform"].pop("rotation_quaternion", None)
+            scene_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+            changes = migrate_project_files(project.root)
+            migrated = json.loads(scene_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(any("Added quaternion rotations" in change for change in changes))
+            self.assertTrue(all("rotation_quaternion" in entity["transform"] for entity in migrated["entities"]))
+
     def test_scene_manager_switches_scene_and_preserves_persistent_entities(self):
         with TemporaryDirectory() as tmp:
             project = Project.create(Path(tmp) / "Game", name="Game")
@@ -379,6 +401,22 @@ class ProjectSceneTests(unittest.TestCase):
             self.assertIn("Player", names)
             self.assertIn("SecondCamera", names)
             self.assertEqual(manager.current_scene.find(persistent.children[0].id).name, "Child")
+
+    def test_scene_manager_loads_scene_specific_lighting_asset(self):
+        with TemporaryDirectory() as tmp:
+            project = Project.create(Path(tmp) / "Game", name="Game")
+            second = Scene("Second", [Entity("SecondCamera")])
+            second.lighting_settings["fog_density"] = 0.7
+            second.lighting_settings["skybox_enabled"] = False
+            second_path = project.scenes_dir / "second.scenep64"
+            second.save(second_path)
+            manager = SceneManager(project)
+
+            manager.load_scene(second_path)
+            self.assertTrue(manager.apply_queued_scene())
+
+            self.assertEqual(manager.current_scene.lighting_settings["fog_density"], 0.7)
+            self.assertFalse(manager.current_scene.lighting_settings["skybox_enabled"])
 
     def test_scene_manager_applies_explicit_spawn_point_to_persistent_entity(self):
         with TemporaryDirectory() as tmp:
@@ -499,6 +537,39 @@ class ProjectSceneTests(unittest.TestCase):
         self.assertNotEqual(forward, world_forward(parent))
         self.assertEqual(child.transform.forward, forward)
         self.assertNotEqual(child.transform.local_forward, forward)
+
+    def test_quaternion_world_rotation_combines_axes_and_sets_local_rotation(self):
+        parent = Entity("Parent")
+        parent.transform.rotation = Vec3(30.0, 20.0, 0.0)
+        child = parent.add_child(Entity("Child"))
+        child.transform.rotation = Vec3(0.0, 45.0, 10.0)
+
+        expected = parent.transform.local_quaternion * child.transform.local_quaternion
+        actual = world_quaternion(child)
+        self.assertAlmostEqual(abs(expected.x * actual.x + expected.y * actual.y + expected.z * actual.z + expected.w * actual.w), 1.0, places=6)
+        expected_forward = actual * Vec3.forward()
+        actual_forward = world_forward(child)
+        self.assertAlmostEqual(actual_forward.x, expected_forward.x, places=6)
+        self.assertAlmostEqual(actual_forward.y, expected_forward.y, places=6)
+        self.assertAlmostEqual(actual_forward.z, expected_forward.z, places=6)
+
+        target = Quaternion.from_euler(Vec3(-10.0, 80.0, 25.0))
+        set_world_quaternion(child, target)
+        result = world_quaternion(child)
+        self.assertAlmostEqual(abs(target.x * result.x + target.y * result.y + target.z * result.z + target.w * result.w), 1.0, places=6)
+
+    def test_transform_euler_proxy_updates_quaternion_and_quaternion_serialization_wins(self):
+        entity = Entity("Rotating")
+        entity.transform.rotation.y += 90.0
+        forward = entity.transform.local_quaternion * Vec3.forward()
+        self.assertAlmostEqual(forward.x, -1.0, places=6)
+
+        data = entity.to_dict()
+        data["transform"]["rotation"] = [0.0, 0.0, 0.0]
+        loaded = Entity.from_dict(data)
+        loaded_forward = loaded.transform.local_quaternion * Vec3.forward()
+        self.assertAlmostEqual(loaded_forward.x, -1.0, places=6)
+        self.assertIn("rotation_quaternion", loaded.to_dict()["transform"])
 
     def test_transform_owner_binding_survives_assignment_and_child_parenting(self):
         parent = Entity("Parent")
@@ -744,13 +815,28 @@ class ProjectSceneTests(unittest.TestCase):
         self.assertEqual(script_component.scripts[0].script, "spin.py")
         self.assertEqual(script_component.scripts[0].class_name, "Spin")
 
-    def test_fog_volume_size_roundtrip(self):
-        root = Entity("Fog")
-        root.add_component(Fog(size=Vec3(10, 20, 30), density=0.25))
-        scene = Scene.from_dict(Scene("Test", [root]).to_dict())
-        fog = scene.fog()
-        self.assertEqual(fog.size.to_list(), [10.0, 20.0, 30.0])
-        self.assertEqual(fog.density, 0.25)
+    def test_scene_saves_lighting_sidecar_and_excludes_embedded_settings(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "main.scenep64"
+            scene = Scene("Test")
+            scene.lighting_settings["fog_density"] = 0.25
+            scene.save(path)
+
+            data = json.loads(path.read_text(encoding="utf-8"))
+            loaded = Scene.load(path)
+
+            self.assertNotIn("render_settings", data)
+            self.assertTrue(lighting_path_for_scene(path).exists())
+            self.assertEqual(loaded.lighting_settings["fog_density"], 0.25)
+
+    def test_legacy_fog_component_is_removed_without_copying_values(self):
+        scene = Scene.from_dict({
+            "name": "Legacy",
+            "entities": [{"name": "Fog", "components": [{"type": "Fog", "density": 0.75}]}],
+        })
+
+        self.assertEqual(scene.entities[0].components, [])
+        self.assertEqual(scene.lighting_settings["fog_density"], 0.0)
 
     def test_light_serializes_extended_fields(self):
         light = Light(kind="spot", range=24.0, spot_angle=35.0, falloff=3.0)

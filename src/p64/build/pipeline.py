@@ -14,6 +14,7 @@ from p64.engine.audio import ensure_audio_clips_for_assets
 from p64.engine.assets import AssetMetadata, discover_metadata
 from p64.engine.files import PROJECT_FILE, alternate_scene_path, is_scene_file
 from p64.engine.material import MaterialAsset, load_material_metadata, resolve_material_reference
+from p64.engine.lighting import clamp_lighting_settings, lighting_path_for_scene
 from p64.engine.project import Project
 from p64.engine.validation import asset_metadata_by_id, scene_reference_errors
 
@@ -52,6 +53,8 @@ def validate_project(project_root: Path) -> BuildReport:
             scene_path = alternate
         else:
             report.errors.append(f"Startup scene missing: {project.startup_scene}")
+    for candidate in project.scenes_dir.rglob("*.scenep64"):
+        _validate_lighting_asset(project, candidate, report)
     if scene_path.exists():
         try:
             scene = project.load_startup_scene()
@@ -129,6 +132,20 @@ def validate_project(project_root: Path) -> BuildReport:
             report.errors.append(f"Script encoding error {script_path.relative_to(project.root).as_posix()}: {exc}")
 
     return report
+
+
+def _validate_lighting_asset(project: Project, scene_path: Path, report: BuildReport) -> None:
+    lighting_path = lighting_path_for_scene(scene_path)
+    if not lighting_path.exists():
+        report.errors.append(f"Lighting asset missing: {lighting_path.relative_to(project.root)}")
+        return
+    try:
+        lighting_data = json.loads(lighting_path.read_text(encoding="utf-8"))
+        if not isinstance(lighting_data, dict):
+            raise ValueError("root must be an object")
+        clamp_lighting_settings(dict(lighting_data))
+    except Exception as exc:
+        report.errors.append(f"Invalid lighting asset {lighting_path.relative_to(project.root)}: {exc}")
 
 
 def _script_files(project: Project) -> list[Path]:

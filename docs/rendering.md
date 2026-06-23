@@ -47,8 +47,14 @@ dithering. It supports the same alpha cutout property as the Lit shader.
 Render settings support nearest, linear, and three-point texture sampling. The
 default project setting is three-point for a retro 3D look.
 
-Texture filtering, fog, color levels, dithering, and lights are scene/project
-render settings. They are not material properties.
+Texture filtering, color levels, and dithering are project render settings.
+Skybox, clouds, and global fog are stored per Scene in the coupled
+`<scene_name>.lightingp64` asset. Open `Window > Lighting Settings` or
+double-click that asset to edit the active Scene. Directional, point, and spot
+lights remain Scene components.
+
+Global fog uses color, near/far distance, and density values across the entire
+Scene. Local Fog volume components are no longer used.
 
 ## Materials
 

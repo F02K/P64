@@ -21,7 +21,7 @@ custom `.shader` files, and Windows desktop builds through PyInstaller.
 - Builtin engine assets live under `packages/P64Builtin/`.
 - Generated builtin shaders and build-runtime support files are refreshed when a
   project is opened, so older projects pick up engine updates automatically.
-- Scene graph with entities, parenting, transforms, cameras, lights, fog volumes,
+- Scene graph with entities, parenting, transforms, cameras, lights, scene-global fog,
   mesh renderers, and Python script components.
 - OBJ/MTL model import with internal mesh entries, Source Materials, UVs,
   normals, optional vertex colors, texture metadata, diffuse material tinting,
@@ -39,6 +39,9 @@ custom `.shader` files, and Windows desktop builds through PyInstaller.
   Scene view grid settings.
 - Camera-centered Scene grid with distance fade and subtle world axes.
 - Multi-scene editing by double-clicking `.scenep64` files in the asset browser.
+- Scene-coupled `.lightingp64` assets for sky, clouds, and global fog.
+- Interactive Canvas UI with Button, Toggle, Slider, ScrollView, mouse and controller navigation.
+- Quaternion-based transform hierarchies and collider raycasts for gameplay scripts.
 - N64-inspired rendering path with low-resolution upscaling, nearest/three-point
   texture sampling, vertex lighting, material and vertex color tinting,
   quantization, optional dithering, fog, material shader selection, shader

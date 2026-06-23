@@ -21,13 +21,12 @@ from p64.engine.assets import AssetMetadata, discover_metadata, model_meshes, re
 from p64.engine.audio import audio_info
 from p64.engine.builtin import PARTICLE_MATERIAL_RELATIVE, SPRITE_MATERIAL_RELATIVE, UI_IMAGE_MATERIAL_RELATIVE
 from p64.engine.collision import apply_mesh_primitive_defaults
-from p64.engine.components import AudioListener, AudioSource, Camera, Canvas, CharacterController, Collider, EntityPhysics, Fog, Light, MeshRenderer, ModelRenderer, ParticleEmitter, RectTransform, ScriptComponent, ScriptEntry, SpawnPoint, SpriteRenderer, UIImage, UIText
+from p64.engine.components import AudioListener, AudioSource, Camera, Canvas, CharacterController, Collider, EntityPhysics, Light, MeshRenderer, ModelRenderer, ParticleEmitter, RectTransform, ScriptComponent, ScriptEntry, SpawnPoint, SpriteRenderer, UIButton, UIControl, UIImage, UIScrollView, UISlider, UIText, UIToggle
 from p64.engine.entity import ENTITY, GAME_OBJECT, Entity, entity_effectively_active, set_object_type_recursive
 from p64.engine.files import is_metadata_file
 from p64.engine.files import find_metadata_for_source
 from p64.engine.material import MaterialAsset, is_material_file, load_material_metadata, material_asset_id, resolve_material_reference
 from p64.engine.math import Vec3
-from p64.engine.render_settings import clamp_render_settings, default_render_settings
 from p64.engine.shader import discover_shaders, normalize_shader_id, parse_shader, shader_asset_id
 from p64.engine.validation import entity_reference_errors
 
@@ -39,12 +38,15 @@ AVAILABLE_COMPONENTS = (
     "Canvas",
     "UIImage",
     "UIText",
+    "UIButton",
+    "UIToggle",
+    "UISlider",
+    "UIScrollView",
     "ParticleEmitter",
     "AudioSource",
     "AudioListener",
     "Camera",
     "Light",
-    "Fog",
     "SpawnPoint",
     "Collider",
     "CharacterController",
@@ -69,6 +71,8 @@ def component_summary(component: object) -> str:
         return f"UIImage: {component.texture}"
     if isinstance(component, UIText):
         return f"UIText: {component.text}"
+    if isinstance(component, UIControl):
+        return f"{component.type_name}: {'enabled' if component.interactable else 'disabled'}"
     if isinstance(component, ParticleEmitter):
         return f"ParticleEmitter: rate={component.rate}"
     if isinstance(component, Camera):
@@ -79,8 +83,6 @@ def component_summary(component: object) -> str:
         return f"AudioSource: {component.clip}"
     if isinstance(component, AudioListener):
         return f"AudioListener: active={component.active}"
-    if isinstance(component, Fog):
-        return f"Fog: near={component.near} far={component.far}"
     return type(component).__name__
 
 
@@ -179,8 +181,6 @@ def create_inspector_mixin(
                 self._add_model_renderer()
             elif component_name == "AudioSource":
                 self._add_audio_source()
-            elif component_name == "Fog":
-                self._add_fog()
             elif component_name == "ScriptComponent":
                 self._add_script_component()
             else:
@@ -196,7 +196,8 @@ def create_inspector_mixin(
                 self._populate_asset_inspector(self.selected_asset)
                 return
             if not self.selected:
-                self._add_scene_render_settings_editor()
+                self.inspector_layout.addWidget(QLabel("No SceneObject selected", self.inspector))
+                self.inspector_layout.addStretch(1)
                 return
 
             self._add_entity_header()
@@ -217,10 +218,10 @@ def create_inspector_mixin(
                     self._add_ui_image_editor(component)
                 elif isinstance(component, UIText):
                     self._add_ui_text_editor(component)
+                elif isinstance(component, UIControl):
+                    self._add_ui_control_editor(component)
                 elif isinstance(component, ParticleEmitter):
                     self._add_particle_emitter_editor(component)
-                elif isinstance(component, Fog):
-                    self._add_fog_editor(component)
                 elif isinstance(component, Camera):
                     self._add_camera_editor(component)
                 elif isinstance(component, Light):
@@ -243,37 +244,6 @@ def create_inspector_mixin(
             for component in self.selected.components:
                 if isinstance(component, (MeshRenderer, ModelRenderer)):
                     self._add_material_slots_editor(component)
-            self.inspector_layout.addStretch(1)
-
-        def _add_scene_render_settings_editor(self) -> None:
-            scene = getattr(self, "scene", None)
-            if scene is None:
-                self.inspector_layout.addWidget(QLabel("No SceneObject selected", self.inspector))
-                return
-            settings = self._scene_render_settings()
-            content = QWidget(self.inspector)
-            form = QFormLayout(content)
-            form.setContentsMargins(8, 6, 8, 8)
-            enabled = QCheckBox(content)
-            enabled.setChecked(bool(settings.get("skybox_enabled", True)))
-            enabled.toggled.connect(lambda checked: self._set_scene_render_bool("skybox_enabled", checked))
-            coverage = QLineEdit(str(settings.get("skybox_cloud_coverage", 0.45)), content)
-            scale = QLineEdit(str(settings.get("skybox_cloud_scale", 3.0)), content)
-            height = QLineEdit(str(settings.get("skybox_cloud_height", 80.0)), content)
-            softness = QLineEdit(str(settings.get("skybox_cloud_softness", 0.08)), content)
-            coverage.editingFinished.connect(lambda: self._set_scene_render_float(coverage, "skybox_cloud_coverage", 0.0, 1.0))
-            scale.editingFinished.connect(lambda: self._set_scene_render_float(scale, "skybox_cloud_scale", 0.1, 24.0))
-            height.editingFinished.connect(lambda: self._set_scene_render_float(height, "skybox_cloud_height", 0.1, 10000.0))
-            softness.editingFinished.connect(lambda: self._set_scene_render_float(softness, "skybox_cloud_softness", 0.0, 1.0))
-            form.addRow("Skybox Enabled", enabled)
-            form.addRow("Sky Top", self._color_editor(settings.get("skybox_top_color"), lambda values: self._set_scene_render_color("skybox_top_color", values)))
-            form.addRow("Sky Horizon", self._color_editor(settings.get("skybox_horizon_color"), lambda values: self._set_scene_render_color("skybox_horizon_color", values)))
-            form.addRow("Cloud Color", self._color_editor(settings.get("skybox_cloud_color"), lambda values: self._set_scene_render_color("skybox_cloud_color", values)))
-            form.addRow("Cloud Coverage", coverage)
-            form.addRow("Cloud Scale", scale)
-            form.addRow("Cloud Height", height)
-            form.addRow("Cloud Softness", softness)
-            self.inspector_layout.addWidget(self._foldout_panel("Scene Render Settings", "scene:render_settings", content))
             self.inspector_layout.addStretch(1)
 
         def _populate_asset_inspector(self, path: Path) -> None:
@@ -575,9 +545,12 @@ def create_inspector_mixin(
             resolution_mode.setCurrentText(component.resolution_mode if component.resolution_mode in {"auto", "fixed"} else "auto")
             order.editingFinished.connect(lambda: self._apply_int(order, component, "sort_order"))
             resolution_mode.currentTextChanged.connect(lambda value: self._set_text_value(component, "resolution_mode", value))
+            initial_focus = QLineEdit(component.initial_focus, content)
+            initial_focus.editingFinished.connect(lambda: self._apply_text(initial_focus, component, "initial_focus"))
             form.addRow("Sort Order", order)
             form.addRow("Resolution Mode", resolution_mode)
             form.addRow("Reference Resolution", self._vec3_editor(component.reference_resolution))
+            form.addRow("Initial Focus Entity ID", initial_focus)
             self.inspector_layout.addWidget(self._component_panel(component, "Canvas", content))
 
         def _add_ui_image_editor(self, component: UIImage) -> None:
@@ -649,6 +622,71 @@ def create_inspector_mixin(
             form.addRow("Pivot", self._vec3_editor(component.pivot))
             form.addRow("Alignment", align)
             self.inspector_layout.addWidget(self._component_panel(component, "UIText", content))
+
+        def _add_ui_control_editor(self, component: UIControl) -> None:
+            content, form = self._component_content_widget()
+            interactable = QCheckBox(content)
+            interactable.setChecked(component.interactable)
+            interactable.toggled.connect(lambda value: self._set_bool_value(component, "interactable", value))
+            form.addRow("Interactable", interactable)
+            for label, name in (
+                ("Navigate Up", "navigation_up"),
+                ("Navigate Down", "navigation_down"),
+                ("Navigate Left", "navigation_left"),
+                ("Navigate Right", "navigation_right"),
+            ):
+                edit = QLineEdit(str(getattr(component, name)), content)
+                edit.editingFinished.connect(lambda field=edit, attr=name: self._apply_text(field, component, attr))
+                form.addRow(f"{label} Entity ID", edit)
+            for label, name in (
+                ("Normal Tint", "normal_tint"),
+                ("Hover Tint", "hover_tint"),
+                ("Focus Tint", "focus_tint"),
+                ("Pressed Tint", "pressed_tint"),
+                ("Disabled Tint", "disabled_tint"),
+            ):
+                tint = getattr(component, name)
+                form.addRow(label, self._color_editor(tint, lambda values, target=tint: self._set_vec3_color(target, values)))
+
+            if isinstance(component, UIToggle):
+                is_on = QCheckBox(content)
+                is_on.setChecked(component.is_on)
+                is_on.toggled.connect(lambda value: self._set_bool_value(component, "is_on", value))
+                checkmark = QLineEdit(component.checkmark_entity, content)
+                checkmark.editingFinished.connect(lambda: self._apply_text(checkmark, component, "checkmark_entity"))
+                form.addRow("Is On", is_on)
+                form.addRow("Checkmark Entity ID", checkmark)
+            elif isinstance(component, UISlider):
+                for label, name in (("Minimum", "minimum"), ("Maximum", "maximum"), ("Value", "value"), ("Step", "step")):
+                    edit = QLineEdit(str(getattr(component, name)), content)
+                    edit.editingFinished.connect(lambda field=edit, attr=name: self._apply_float(field, component, attr))
+                    form.addRow(label, edit)
+                direction = QComboBox(content)
+                direction.addItems(["horizontal", "vertical"])
+                direction.setCurrentText(component.direction)
+                direction.currentTextChanged.connect(lambda value: self._set_text_value(component, "direction", value))
+                fill = QLineEdit(component.fill_entity, content)
+                handle = QLineEdit(component.handle_entity, content)
+                fill.editingFinished.connect(lambda: self._apply_text(fill, component, "fill_entity"))
+                handle.editingFinished.connect(lambda: self._apply_text(handle, component, "handle_entity"))
+                form.addRow("Direction", direction)
+                form.addRow("Fill Entity ID", fill)
+                form.addRow("Handle Entity ID", handle)
+            elif isinstance(component, UIScrollView):
+                content_ref = QLineEdit(component.content_entity, content)
+                content_ref.editingFinished.connect(lambda: self._apply_text(content_ref, component, "content_entity"))
+                form.addRow("Content Entity ID", content_ref)
+                for label, name in (("Horizontal", "horizontal"), ("Vertical", "vertical")):
+                    checkbox = QCheckBox(content)
+                    checkbox.setChecked(bool(getattr(component, name)))
+                    checkbox.toggled.connect(lambda value, attr=name: self._set_bool_value(component, attr, value))
+                    form.addRow(label, checkbox)
+                for label, name in (("Wheel Speed", "wheel_speed"), ("Drag Speed", "drag_speed"), ("Stick Speed", "stick_speed")):
+                    edit = QLineEdit(str(getattr(component, name)), content)
+                    edit.editingFinished.connect(lambda field=edit, attr=name: self._apply_float(field, component, attr))
+                    form.addRow(label, edit)
+                form.addRow("Scroll Position", self._vec3_editor(component.scroll_position))
+            self.inspector_layout.addWidget(self._component_panel(component, component.type_name, content))
 
         def _add_particle_emitter_editor(self, component: ParticleEmitter) -> None:
             content, form = self._component_content_widget()
@@ -923,21 +961,6 @@ def create_inspector_mixin(
                     row_layout.addWidget(fallback)
                 layout.addWidget(row_box)
             self.inspector_layout.addWidget(self._foldout_panel("Materials", f"{id(component)}:Materials", content))
-
-        def _add_fog_editor(self, component: Fog) -> None:
-            content, form = self._component_content_widget()
-            near = QLineEdit(str(component.near), content)
-            far = QLineEdit(str(component.far), content)
-            density = QLineEdit(str(component.density), content)
-            near.editingFinished.connect(lambda: self._apply_float(near, component, "near"))
-            far.editingFinished.connect(lambda: self._apply_float(far, component, "far"))
-            density.editingFinished.connect(lambda: self._apply_float(density, component, "density"))
-            form.addRow("Color", self._color_editor(component.color, lambda values: self._set_vec3_color(component.color, values)))
-            form.addRow("Size", self._vec3_editor(component.size))
-            form.addRow("Near", near)
-            form.addRow("Far", far)
-            form.addRow("Density", density)
-            self.inspector_layout.addWidget(self._component_panel(component, "Fog Volume", content))
 
         def _add_camera_editor(self, component: Camera) -> None:
             content, form = self._component_content_widget()
@@ -1379,6 +1402,14 @@ def create_inspector_mixin(
                 replacement = UIImage(material=UI_IMAGE_MATERIAL_RELATIVE)
             elif isinstance(component, UIText):
                 replacement = UIText()
+            elif isinstance(component, UIButton):
+                replacement = UIButton()
+            elif isinstance(component, UIToggle):
+                replacement = UIToggle()
+            elif isinstance(component, UISlider):
+                replacement = UISlider()
+            elif isinstance(component, UIScrollView):
+                replacement = UIScrollView()
             elif isinstance(component, ParticleEmitter):
                 replacement = ParticleEmitter(material=PARTICLE_MATERIAL_RELATIVE)
             elif isinstance(component, Camera):
@@ -1389,8 +1420,6 @@ def create_inspector_mixin(
                 replacement = AudioSource()
             elif isinstance(component, AudioListener):
                 replacement = AudioListener()
-            elif isinstance(component, Fog):
-                replacement = Fog()
             elif isinstance(component, ScriptComponent):
                 replacement = ScriptComponent()
             elif isinstance(component, SpawnPoint):
@@ -1525,38 +1554,6 @@ def create_inspector_mixin(
         def _set_audio_listener_active(self, component: AudioListener, checked: bool) -> None:
             component.active = checked
             self._mark_dirty()
-            self.viewport.update()
-
-        def _scene_render_settings(self) -> dict[str, Any]:
-            scene = getattr(self, "scene", None)
-            if scene is None:
-                return default_render_settings()
-            scene.render_settings = clamp_render_settings({**default_render_settings(), **scene.render_settings})
-            return scene.render_settings
-
-        def _set_scene_render_bool(self, key: str, value: bool) -> None:
-            settings = self._scene_render_settings()
-            settings[key] = bool(value)
-            self._mark_dirty("Edit Scene Render Settings")
-            self.viewport.update()
-
-        def _set_scene_render_color(self, key: str, values: list[float]) -> None:
-            settings = self._scene_render_settings()
-            settings[key] = [float(values[0]), float(values[1]), float(values[2])]
-            clamp_render_settings(settings)
-            self._mark_dirty("Edit Scene Render Settings")
-            self.viewport.update()
-
-        def _set_scene_render_float(self, edit: Any, key: str, minimum: float, maximum: float) -> None:
-            try:
-                value = float(edit.text())
-            except ValueError:
-                self._log(f"Invalid number: {edit.text()}")
-                return
-            settings = self._scene_render_settings()
-            settings[key] = max(minimum, min(maximum, value))
-            edit.setText(str(settings[key]))
-            self._mark_dirty("Edit Scene Render Settings")
             self.viewport.update()
 
         def _color_editor(self, value: Any, apply_callback: Any) -> Any:
@@ -1703,13 +1700,6 @@ def create_inspector_mixin(
             self._mark_dirty()
             self._populate_inspector()
             self.viewport.reload_assets()
-
-        def _add_fog(self) -> None:
-            if self.selected:
-                self.selected.add_component(Fog())
-                self._mark_dirty()
-                self._populate_inspector()
-                self.viewport.update()
 
         def _add_audio_source(self) -> None:
             if not self.selected:

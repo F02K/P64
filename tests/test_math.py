@@ -1,7 +1,7 @@
 import unittest
 
 from p64.editor.utils.math import _add_vec3, _lerp_vec3, _normalize_vec3, _scale_vec3, _sub_vec3, _vec3_length
-from p64.engine.math import Vec3, basis_from_rotation, clamp, cross, dot, forward_from_yaw, length, lerp, lerp_vec3, normalize
+from p64.engine.math import Quaternion, Vec3, basis_from_rotation, clamp, cross, dot, forward_from_yaw, length, lerp, lerp_vec3, normalize
 
 
 class EngineMathTests(unittest.TestCase):
@@ -80,6 +80,31 @@ class EngineMathTests(unittest.TestCase):
         self.assertEqual(_vec3_length(Vec3(0, 3, 4)), 5)
         self.assertVec3AlmostEqual(_normalize_vec3(Vec3(0, 3, 4)), Vec3(0, 0.6, 0.8))
         self.assertEqual(_lerp_vec3(Vec3(), Vec3(10, 20, 30), 0.5), Vec3(5, 10, 15))
+
+    def test_quaternion_euler_inverse_and_vector_rotation(self):
+        quaternion = Quaternion.from_euler(Vec3(20.0, 35.0, -15.0))
+        euler = quaternion.to_euler()
+        restored = Quaternion.from_euler(euler)
+        identity = quaternion * quaternion.inverse()
+        forward = quaternion * Vec3.forward()
+
+        self.assertAlmostEqual(abs(quaternion.x * restored.x + quaternion.y * restored.y + quaternion.z * restored.z + quaternion.w * restored.w), 1.0, places=6)
+        self.assertAlmostEqual(identity.x, 0.0, places=6)
+        self.assertAlmostEqual(identity.y, 0.0, places=6)
+        self.assertAlmostEqual(identity.z, 0.0, places=6)
+        self.assertAlmostEqual(identity.w, 1.0, places=6)
+        self.assertAlmostEqual(forward.length(), 1.0, places=6)
+
+    def test_quaternion_angle_axis_look_rotation_and_slerp(self):
+        yaw = Quaternion.angle_axis(90.0, Vec3.up())
+        halfway = Quaternion.slerp(Quaternion.identity(), yaw, 0.5)
+        looked = Quaternion.look_rotation(Vec3.forward())
+
+        self.assertVec3AlmostEqual(yaw * Vec3.forward(), Vec3(-1.0, 0.0, 0.0))
+        self.assertVec3AlmostEqual(looked * Vec3.forward(), Vec3.forward())
+        rotated = halfway * Vec3.forward()
+        self.assertAlmostEqual(rotated.x, -0.707106, places=5)
+        self.assertAlmostEqual(rotated.z, -0.707106, places=5)
 
 
 if __name__ == "__main__":

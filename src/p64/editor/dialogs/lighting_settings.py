@@ -1,21 +1,27 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
-from p64.engine.render_settings import clamp_render_settings, default_render_settings
+from p64.engine.lighting import clamp_lighting_settings, default_lighting_settings, lighting_path_for_scene
 
 
 def apply_lighting_settings(scene: Any, values: dict[str, Any]) -> dict[str, Any]:
-    scene.render_settings = clamp_render_settings({
-        **default_render_settings(),
-        **dict(getattr(scene, "render_settings", {})),
+    scene.lighting_settings = clamp_lighting_settings({
+        **default_lighting_settings(),
+        **dict(getattr(scene, "lighting_settings", {})),
         **values,
     })
-    return scene.render_settings
+    return scene.lighting_settings
 
 
-def open_lighting_settings_dialog(parent: object, scene: Any, on_changed: Callable[[], None]) -> None:
+def open_lighting_settings_dialog(
+    parent: object,
+    scene: Any,
+    scene_path: Path,
+    on_changed: Callable[[], None],
+) -> None:
     try:
         from PySide6.QtWidgets import (
             QCheckBox,
@@ -23,9 +29,10 @@ def open_lighting_settings_dialog(parent: object, scene: Any, on_changed: Callab
             QDialog,
             QDialogButtonBox,
             QFormLayout,
-            QHBoxLayout,
+            QLabel,
             QLineEdit,
             QPushButton,
+            QTabWidget,
             QVBoxLayout,
             QWidget,
         )
@@ -33,56 +40,64 @@ def open_lighting_settings_dialog(parent: object, scene: Any, on_changed: Callab
         raise RuntimeError("Install PySide6 to use the P64 editor.") from exc
 
     settings = apply_lighting_settings(scene, {})
+    lighting_path = lighting_path_for_scene(scene_path)
     dialog = QDialog(parent)
-    dialog.setWindowTitle("Lighting Settings")
-    dialog.resize(420, 360)
+    dialog.setWindowTitle(f"Lighting Settings — {scene_path.name}")
+    dialog.resize(480, 430)
     layout = QVBoxLayout(dialog)
-    form = QFormLayout()
-    layout.addLayout(form)
+    scene_label = QLabel(f"Active Scene: {scene_path.name}", dialog)
+    scene_label.setStyleSheet("font-weight: 600;")
+    asset_label = QLabel(f"Asset: {lighting_path}", dialog)
+    asset_label.setWordWrap(True)
+    layout.addWidget(scene_label)
+    layout.addWidget(asset_label)
+    tabs = QTabWidget(dialog)
+    layout.addWidget(tabs)
 
-    skybox_enabled = QCheckBox(dialog)
-    skybox_enabled.setChecked(bool(settings.get("skybox_enabled", True)))
-    fog_enabled = QCheckBox(dialog)
-    fog_enabled.setChecked(bool(settings.get("fog", True)))
-    coverage = QLineEdit(str(settings.get("skybox_cloud_coverage", 0.45)), dialog)
-    scale = QLineEdit(str(settings.get("skybox_cloud_scale", 3.0)), dialog)
-    height = QLineEdit(str(settings.get("skybox_cloud_height", 80.0)), dialog)
-    softness = QLineEdit(str(settings.get("skybox_cloud_softness", 0.08)), dialog)
+    sky_page = QWidget(tabs)
+    sky_form = QFormLayout(sky_page)
+    fog_page = QWidget(tabs)
+    fog_form = QFormLayout(fog_page)
+    tabs.addTab(sky_page, "Sky & Clouds")
+    tabs.addTab(fog_page, "Fog")
 
     def update(values: dict[str, Any]) -> None:
         apply_lighting_settings(scene, values)
-        refresh_numeric_fields()
         on_changed()
 
-    def update_float(edit: QLineEdit, key: str) -> None:
-        try:
-            update({key: float(edit.text())})
-        except ValueError:
-            edit.setText(str(settings.get(key, "")))
+    def float_editor(form: Any, label: str, key: str) -> None:
+        edit = QLineEdit(str(settings[key]), dialog)
 
-    def refresh_numeric_fields() -> None:
-        current = scene.render_settings
-        coverage.setText(str(current.get("skybox_cloud_coverage", 0.45)))
-        scale.setText(str(current.get("skybox_cloud_scale", 3.0)))
-        height.setText(str(current.get("skybox_cloud_height", 80.0)))
-        softness.setText(str(current.get("skybox_cloud_softness", 0.08)))
+        def commit() -> None:
+            try:
+                update({key: float(edit.text())})
+                edit.setText(str(scene.lighting_settings[key]))
+            except ValueError:
+                edit.setText(str(scene.lighting_settings[key]))
 
+        edit.editingFinished.connect(commit)
+        form.addRow(label, edit)
+
+    skybox_enabled = QCheckBox(dialog)
+    skybox_enabled.setChecked(bool(settings["skybox_enabled"]))
     skybox_enabled.toggled.connect(lambda checked: update({"skybox_enabled": checked}))
-    fog_enabled.toggled.connect(lambda checked: update({"fog": checked}))
-    coverage.editingFinished.connect(lambda: update_float(coverage, "skybox_cloud_coverage"))
-    scale.editingFinished.connect(lambda: update_float(scale, "skybox_cloud_scale"))
-    height.editingFinished.connect(lambda: update_float(height, "skybox_cloud_height"))
-    softness.editingFinished.connect(lambda: update_float(softness, "skybox_cloud_softness"))
+    sky_form.addRow("Skybox Enabled", skybox_enabled)
+    sky_form.addRow("Sky Top", _color_editor(dialog, settings["skybox_top_color"], lambda values: update({"skybox_top_color": values})))
+    sky_form.addRow("Sky Horizon", _color_editor(dialog, settings["skybox_horizon_color"], lambda values: update({"skybox_horizon_color": values})))
+    sky_form.addRow("Cloud Color", _color_editor(dialog, settings["skybox_cloud_color"], lambda values: update({"skybox_cloud_color": values})))
+    float_editor(sky_form, "Cloud Coverage", "skybox_cloud_coverage")
+    float_editor(sky_form, "Cloud Scale", "skybox_cloud_scale")
+    float_editor(sky_form, "Cloud Height", "skybox_cloud_height")
+    float_editor(sky_form, "Cloud Softness", "skybox_cloud_softness")
 
-    form.addRow("Skybox Enabled", skybox_enabled)
-    form.addRow("Fog Enabled", fog_enabled)
-    form.addRow("Sky Top", _color_editor(dialog, settings.get("skybox_top_color"), lambda values: update({"skybox_top_color": values})))
-    form.addRow("Sky Horizon", _color_editor(dialog, settings.get("skybox_horizon_color"), lambda values: update({"skybox_horizon_color": values})))
-    form.addRow("Cloud Color", _color_editor(dialog, settings.get("skybox_cloud_color"), lambda values: update({"skybox_cloud_color": values})))
-    form.addRow("Cloud Coverage", coverage)
-    form.addRow("Cloud Scale", scale)
-    form.addRow("Cloud Height", height)
-    form.addRow("Cloud Softness", softness)
+    fog_enabled = QCheckBox(dialog)
+    fog_enabled.setChecked(bool(settings["fog_enabled"]))
+    fog_enabled.toggled.connect(lambda checked: update({"fog_enabled": checked}))
+    fog_form.addRow("Fog Enabled", fog_enabled)
+    fog_form.addRow("Fog Color", _color_editor(dialog, settings["fog_color"], lambda values: update({"fog_color": values})))
+    float_editor(fog_form, "Near", "fog_near")
+    float_editor(fog_form, "Far", "fog_far")
+    float_editor(fog_form, "Density", "fog_density")
 
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
     buttons.rejected.connect(dialog.reject)
@@ -107,8 +122,7 @@ def _color_editor(parent: object, value: Any, on_changed: Callable[[list[float]]
 
     def choose() -> None:
         nonlocal values
-        initial = QColor.fromRgbF(values[0], values[1], values[2])
-        selected = QColorDialog.getColor(initial, row, "Pick Color")
+        selected = QColorDialog.getColor(QColor.fromRgbF(*values), row, "Pick Color")
         if not selected.isValid():
             return
         values = [selected.redF(), selected.greenF(), selected.blueF()]

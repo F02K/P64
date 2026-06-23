@@ -8,11 +8,12 @@ from typing import Any, Callable
 
 from p64.engine.assets import AssetMetadata, discover_metadata, model_meshes, resolve_model_mesh
 from p64.engine.builtin import CLOUD_SHADER_RELATIVE, ERROR_SHADER_RELATIVE, PARTICLE_SHADER_RELATIVE, SKYBOX_SHADER_RELATIVE, SPRITE_SHADER_RELATIVE, UI_IMAGE_SHADER_RELATIVE, UI_TEXT_SHADER_RELATIVE
-from p64.engine.collision import collider_bounds, collider_sphere, controller_bounds
+from p64.engine.collision import collider_bounds, collider_sphere, controller_bounds, ray_triangle_intersection
 from p64.engine.components import AudioSource, Camera, Canvas, CharacterController, Collider, Light, MeshRenderer, ModelRenderer, ParticleEmitter, RectTransform, SpawnPoint, SpriteRenderer, UIImage, UIText
 from p64.engine.entity import Entity, entity_effectively_active
 from p64.engine.material import MaterialAsset, load_material_metadata, resolve_material_reference
-from p64.engine.math import Vec3
+from p64.engine.math import Quaternion, Vec3
+from p64.engine.lighting import clamp_lighting_settings, default_lighting_settings
 from p64.engine.mesh_geometry import clear_mesh_geometry_cache, convex_hull, mesh_triangles, render_geometry_for, transform_triangle
 from p64.engine.obj import MODEL_CACHE_VERSION, mesh_vertices_for_group, model_cache_for_obj, model_source_signature, parse_obj
 from p64.engine.project import Project
@@ -20,6 +21,7 @@ from p64.engine.render_settings import clamp_render_settings, default_render_set
 from p64.engine.scene import Scene
 from p64.engine.shader import default_shader_id, normalize_shader_id, parse_shader
 from p64.engine.transforms import world_forward, world_position, world_right, world_rotation, world_scale, world_up
+from p64.engine.ui import build_ui_layout, canvas_layout_size, ui_control
 from p64.renderer.shaders import CLOUD_PLANE_FRAGMENT_SHADER, CLOUD_PLANE_VERTEX_SHADER, ERROR_FRAGMENT_SHADER, ERROR_VERTEX_SHADER, PARTICLE_FRAGMENT_SHADER, PARTICLE_VERTEX_SHADER, SKYBOX_FRAGMENT_SHADER, SKYBOX_VERTEX_SHADER, SPRITE_FRAGMENT_SHADER, SPRITE_VERTEX_SHADER, STANDARD_VERTEX_LIT_FRAGMENT_SHADER, STANDARD_VERTEX_LIT_VERTEX_SHADER, UI_FRAGMENT_SHADER, UI_VERTEX_SHADER
 
 
@@ -233,7 +235,7 @@ class SceneRenderer:
         game_view: bool = False,
         output_framebuffer: Any | None = None,
     ) -> bool:
-        render_settings = clamp_render_settings({**default_render_settings(), **scene.render_settings})
+        render_settings = clamp_render_settings({**default_render_settings(), **self.project.render_settings, **scene.render_settings})
         missing_camera = game_view and scene.active_camera() is None
         if missing_camera:
             self.ctx.viewport = (0, 0, max(width, 1), max(height, 1))
@@ -274,22 +276,24 @@ class SceneRenderer:
             view = _view_matrix(render_camera)
             aspect = max(width / max(height, 1), 0.01)
             projection = _perspective_matrix(render_camera.fov, aspect, render_camera.near, render_camera.far)
-            render_settings = clamp_render_settings({**default_render_settings(), **scene.render_settings})
+            render_settings = clamp_render_settings({**default_render_settings(), **self.project.render_settings, **scene.render_settings})
+            lighting_settings = clamp_lighting_settings({**default_lighting_settings(), **scene.lighting_settings})
             self._current_scene = scene
             self._current_camera = render_camera
             self._current_aspect = aspect
             self._current_view = view
             self._current_projection = projection
             self._current_render_settings = render_settings
+            self._current_lighting_settings = lighting_settings
             self._render_time = float(getattr(self, "_render_time", 0.0)) + (1.0 / 60.0)
             active_entities = list(scene.walk_active())
             if self._profiler_active():
                 self._add_render_counts(active_entities)
-            if render_settings.get("skybox_enabled", True):
+            if lighting_settings.get("skybox_enabled", True):
                 with self._profiler_section("render skybox"):
-                    self._draw_skybox(render_camera, render_settings)
+                    self._draw_skybox(render_camera, lighting_settings)
                 with self._profiler_section("render clouds"):
-                    self._draw_cloud_plane(render_camera, view, projection, render_settings)
+                    self._draw_cloud_plane(render_camera, view, projection, lighting_settings)
             submitted = 0
             with self._profiler_section("render meshes"):
                 for entity in active_entities:
@@ -419,7 +423,8 @@ class SceneRenderer:
                 if not isinstance(component, (MeshRenderer, ModelRenderer)) or not component.enabled or not component.visible:
                     continue
                 for triangle in mesh_triangles(self.project, component):
-                    hit = _ray_triangle_intersection(origin, direction, transform_triangle(matrix, triangle))
+                    result = ray_triangle_intersection(origin, direction, transform_triangle(matrix, triangle))
+                    hit = result[0] if result is not None else None
                     if hit is None:
                         continue
                     if best_distance is None or hit < best_distance:
@@ -700,28 +705,14 @@ class SceneRenderer:
         self._set_uniform(program, "u_light_falloff", tuple(falloffs))
 
     def _apply_fog_uniforms(self, program: Any, scene: Scene, camera: RenderCamera) -> None:
-        fog_volume = scene.fog_volume()
+        fog = clamp_lighting_settings({**default_lighting_settings(), **scene.lighting_settings})
         self._set_uniform(program, "u_camera_position", (camera.position.x, camera.position.y, camera.position.z))
-        if fog_volume is None:
-            self._set_uniform(program, "u_fog_enabled", False)
-            self._set_uniform(program, "u_fog_color", (0.46, 0.58, 0.72))
-            self._set_uniform(program, "u_fog_center", (0.0, 0.0, 0.0))
-            self._set_uniform(program, "u_fog_size", (1.0, 1.0, 1.0))
-            self._set_uniform(program, "u_fog_near", 20.0)
-            self._set_uniform(program, "u_fog_far", 120.0)
-            self._set_uniform(program, "u_fog_density", 0.0)
-            return
-        entity, fog = fog_volume
-        center = _world_position(entity)
-        scale = world_scale(entity)
-        size = Vec3(fog.size.x * scale.x, fog.size.y * scale.y, fog.size.z * scale.z)
-        self._set_uniform(program, "u_fog_enabled", True)
-        self._set_uniform(program, "u_fog_color", (fog.color.x, fog.color.y, fog.color.z))
-        self._set_uniform(program, "u_fog_center", (center.x, center.y, center.z))
-        self._set_uniform(program, "u_fog_size", (max(size.x, 0.001), max(size.y, 0.001), max(size.z, 0.001)))
-        self._set_uniform(program, "u_fog_near", fog.near)
-        self._set_uniform(program, "u_fog_far", fog.far)
-        self._set_uniform(program, "u_fog_density", fog.density)
+        color = fog["fog_color"]
+        self._set_uniform(program, "u_fog_enabled", bool(fog["fog_enabled"]))
+        self._set_uniform(program, "u_fog_color", tuple(color))
+        self._set_uniform(program, "u_fog_near", float(fog["fog_near"]))
+        self._set_uniform(program, "u_fog_far", float(fog["fog_far"]))
+        self._set_uniform(program, "u_fog_density", float(fog["fog_density"]))
 
     def _draw_model(self, entity: Entity, component: ModelRenderer) -> int:
         model = self._load_model(entity, component)
@@ -819,6 +810,30 @@ class SceneRenderer:
                 self._draw_textured_quad_batch(vertices, program, texture, view, projection, _identity_matrix(), component.start_color, component.start_alpha, material_asset, additive=component.blend_mode == "additive")
 
     def _draw_ui(self, scene: Scene, width: int, height: int) -> None:
+        layout_entries = build_ui_layout(scene, width, height)
+        if layout_entries:
+            for entry in layout_entries:
+                entity = entry.entity
+                if not entity_effectively_active(entity):
+                    continue
+                control = ui_control(entity)
+                tint = control.visual_tint if control else Vec3(1.0, 1.0, 1.0)
+                layout_width, layout_height = canvas_layout_size(entry.canvas, width, height)
+                self._set_ui_clip(entry.clip_rect, width, height, layout_width, layout_height)
+                for component in entity.components:
+                    if isinstance(component, UIImage) and component.enabled:
+                        vertices = ui_quad_vertices(component, layout_width, layout_height, getattr(self, "_render_time", 0.0), entry.rect)
+                        material_asset = self._load_material_asset(resolve_material_reference(self.project.root, component.material))
+                        shader = material_asset.shader if material_asset is not None else UI_IMAGE_SHADER_RELATIVE
+                        program = self._program_for(shader)
+                        texture = self._component_texture(component.texture, material_asset, component.material)
+                        self._draw_ui_quad_batch(vertices, program, texture, layout_width, layout_height, _multiply_color(component.color, tint), component.alpha, material_asset)
+                    elif isinstance(component, UIText) and component.enabled:
+                        text_texture = self._text_texture(component)
+                        vertices = ui_text_vertices(component, layout_width, layout_height, entry.rect, text_texture.size)
+                        self._draw_ui_quad_batch(vertices, self._program_for(UI_TEXT_SHADER_RELATIVE), text_texture.texture, layout_width, layout_height, tint, component.alpha, None)
+            self._set_ui_clip(None, width, height, width, height)
+            return
         canvases = _canvas_entities(scene)
         ui_roots: list[tuple[list[Entity], Canvas]] = (
             [(list(canvas_entity.walk()), canvas) for canvas_entity, canvas in sorted(canvases, key=lambda item: int(item[1].sort_order))]
@@ -846,6 +861,23 @@ class SceneRenderer:
                         text_texture = self._text_texture(component)
                         vertices = ui_text_vertices(component, layout_width, layout_height, entity_rect, text_texture.size)
                         self._draw_ui_quad_batch(vertices, self._program_for(UI_TEXT_SHADER_RELATIVE), text_texture.texture, layout_width, layout_height, Vec3(1.0, 1.0, 1.0), component.alpha, None)
+
+    def _set_ui_clip(self, rect: tuple[float, float, float, float] | None, width: int, height: int, layout_width: int, layout_height: int) -> None:
+        try:
+            if rect is None:
+                self.ctx.disable(self.moderngl.SCISSOR_TEST)
+                return
+            x, y, w, h = rect
+            scale_x, scale_y = width / max(layout_width, 1), height / max(layout_height, 1)
+            self.ctx.scissor = (
+                max(0, int(x * scale_x)),
+                max(0, int(height - (y + h) * scale_y)),
+                max(0, int(w * scale_x)),
+                max(0, int(h * scale_y)),
+            )
+            self.ctx.enable(self.moderngl.SCISSOR_TEST)
+        except Exception:
+            pass
 
     def _draw_textured_quad_batch(
         self,
@@ -1881,6 +1913,22 @@ def _canvas_reference_size(canvas: Canvas) -> tuple[int, int]:
 
 def ui_layout_debug(scene: Scene, width: int, height: int, text_size_getter: Callable[[UIText], tuple[int, int]] | None = None) -> list[UILayoutDebugEntry]:
     entries: list[UILayoutDebugEntry] = []
+    shared_layout = build_ui_layout(scene, width, height)
+    if shared_layout:
+        for layout_entry in shared_layout:
+            entity = layout_entry.entity
+            if entity.rect_transform is None:
+                continue
+            image_rects: list[tuple[float, float, float, float]] = []
+            text_rects: list[tuple[float, float, float, float]] = []
+            for component in entity.components:
+                if isinstance(component, UIImage) and component.enabled:
+                    image_rects.append(image_rect_for_fill_mode(component, layout_entry.rect))
+                elif isinstance(component, UIText) and component.enabled:
+                    texture_size = text_size_getter(component) if text_size_getter is not None else _fallback_text_size(component)
+                    text_rects.append(text_rect_with_aspect(component, layout_entry.rect, texture_size))
+            entries.append(UILayoutDebugEntry(entity.id, entity.name, layout_entry.rect, tuple(image_rects), tuple(text_rects)))
+        return entries
     canvases = _canvas_entities(scene)
     roots: list[tuple[list[Entity], Canvas]] = (
         [(list(canvas_entity.walk()), canvas) for canvas_entity, canvas in sorted(canvases, key=lambda item: int(item[1].sort_order))]
@@ -1919,6 +1967,10 @@ def _distance_squared(a: Vec3, b: Vec3) -> float:
     dy = a.y - b.y
     dz = a.z - b.z
     return dx * dx + dy * dy + dz * dz
+
+
+def _multiply_color(a: Vec3, b: Vec3) -> Vec3:
+    return Vec3(a.x * b.x, a.y * b.y, a.z * b.z)
 
 
 def flipbook_uv_rect(columns: int, rows: int, fps: float, start: int, end: int, time_value: float) -> tuple[float, float, float, float]:
@@ -2328,12 +2380,15 @@ def _view_matrix(camera: RenderCamera) -> list[float]:
 
 
 def camera_basis(rotation: Vec3) -> tuple[Vec3, Vec3, Vec3]:
-    pitch = radians(rotation.x)
-    yaw = radians(rotation.y)
-    forward = normalize(Vec3(sin(yaw) * cos(pitch), sin(pitch), -cos(yaw) * cos(pitch)))
-    right = normalize(Vec3(cos(yaw), 0.0, sin(yaw)))
-    up = normalize(cross(right, forward))
-    return forward, right, up
+    quaternion = Quaternion.from_euler(Vec3(rotation.x, -rotation.y, rotation.z))
+    forward = quaternion * Vec3.forward()
+    right = quaternion * Vec3.right()
+    up = quaternion * Vec3.up()
+    return (
+        forward if isinstance(forward, Vec3) else Vec3.forward(),
+        right if isinstance(right, Vec3) else Vec3.right(),
+        up if isinstance(up, Vec3) else Vec3.up(),
+    )
 
 
 def render_camera_basis(camera: RenderCamera) -> tuple[Vec3, Vec3, Vec3]:
@@ -2500,25 +2555,8 @@ def _render_geometry_label(component: MeshRenderer | ModelRenderer) -> str:
 
 
 def _ray_triangle_intersection(origin: Vec3, direction: Vec3, triangle: tuple[Vec3, Vec3, Vec3]) -> float | None:
-    epsilon = 0.000001
-    v0, v1, v2 = triangle
-    edge1 = Vec3(v1.x - v0.x, v1.y - v0.y, v1.z - v0.z)
-    edge2 = Vec3(v2.x - v0.x, v2.y - v0.y, v2.z - v0.z)
-    h = cross(direction, edge2)
-    a = dot(edge1, h)
-    if -epsilon < a < epsilon:
-        return None
-    f = 1.0 / a
-    s = Vec3(origin.x - v0.x, origin.y - v0.y, origin.z - v0.z)
-    u = f * dot(s, h)
-    if u < 0.0 or u > 1.0:
-        return None
-    q = cross(s, edge1)
-    v = f * dot(direction, q)
-    if v < 0.0 or u + v > 1.0:
-        return None
-    t = f * dot(edge2, q)
-    return t if t > epsilon else None
+    result = ray_triangle_intersection(origin, direction, triangle)
+    return result[0] if result is not None and result[0] > 0.000001 else None
 
 
 def _mul_mat4_vec4(matrix: list[float], vector: tuple[float, float, float, float]) -> tuple[float, float, float, float]:

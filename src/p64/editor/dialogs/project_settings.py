@@ -48,8 +48,6 @@ def open_project_settings_dialog(parent: object, project: Project, scenes: list[
     color_levels = QLineEdit(str(project.render_settings.get("color_levels", 32)))
     dithering = QCheckBox()
     dithering.setChecked(bool(project.render_settings.get("dithering", True)))
-    fog = QCheckBox()
-    fog.setChecked(bool(project.render_settings.get("fog", True)))
     texture_filter = QComboBox()
     filter_labels = {"Three Point": "three_point", "Nearest": "nearest", "Linear": "linear"}
     texture_filter.addItems(list(filter_labels))
@@ -59,7 +57,6 @@ def open_project_settings_dialog(parent: object, project: Project, scenes: list[
     render_form.addRow("Internal Height", height_edit)
     render_form.addRow("Color Levels", color_levels)
     render_form.addRow("Dithering", dithering)
-    render_form.addRow("Fog", fog)
     render_form.addRow("Texture Filter", texture_filter)
     tabs.addTab(render, "Render")
 
@@ -91,7 +88,6 @@ def open_project_settings_dialog(parent: object, project: Project, scenes: list[
                 "internal_resolution": [int(width_edit.text()), int(height_edit.text())],
                 "color_levels": int(color_levels.text()),
                 "dithering": dithering.isChecked(),
-                "fog": fog.isChecked(),
                 "texture_filter": filter_labels.get(texture_filter.currentText(), "three_point"),
             })
             project.editor_settings["scene_grid"] = {
